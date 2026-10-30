@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">远程桌面</string>
+    <string name="accessibility_desc">开启后，已授权的远程控制方可以操作本机屏幕（点击、滑动、输入）。仅在你主动同意远程控制时才会使用。</string>
+    <string name="btn_login">登录</string>
+    <string name="btn_register">注册</string>
+    <string name="btn_logout">退出</string>
+    <string name="btn_refresh">刷新</string>
+    <string name="btn_settings">设置</string>
+    <string name="btn_generate_link">生成控制链接</string>
+    <string name="btn_connect">连接</string>
+    <string name="btn_end">结束控制</string>
+    <string name="btn_send_file">发送文件</string>
+    <string name="btn_keyboard">键盘</string>
+    <string name="btn_cancel_control">取消控制</string>
+    <string name="btn_accept">同意</string>
+    <string name="btn_deny">拒绝</string>
+    <string name="hint_server">服务器地址</string>
+    <string name="hint_username">账号</string>
+    <string name="hint_password">密码</string>
+    <string name="hint_link">输入 8 位链接码</string>
+    <string name="hint_peer_user">对方账号</string>
+    <string name="hint_peer_pass">对方密码</string>
+    <string name="btn_peer_connect">用账号密码连接</string>
+    <string name="title_my_devices">我的设备</string>
+    <string name="title_link">统一链接</string>
+    <string name="title_settings">设置</string>
+    <string name="setting_auto_accept">同账号设备免同意连接（仍会弹提示，可随时取消）</string>
+    <string name="setting_mic">允许远程开启麦克风</string>
+    <string name="setting_camera">允许远程开启摄像头</string>
+    <string name="setting_accessibility">开启无障碍服务（被控必需）</string>
+    <string name="notif_channel">远程控制</string>
+    <string name="notif_controlling">正在被远程控制</string>
+</resources>

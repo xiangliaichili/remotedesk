@@ -1,0 +1,25 @@
+[Unit]
+Description=remotedesk relay server (account + signaling + TURN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=remotedesk
+Group=remotedesk
+WorkingDirectory=/opt/remotedesk
+EnvironmentFile=/opt/remotedesk/.env
+ExecStart=/opt/remotedesk/remotedesk
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+# 基础加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/remotedesk/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

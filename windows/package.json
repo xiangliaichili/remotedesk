@@ -1,0 +1,23 @@
+{
+  "name": "remotedesk",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "remotedesk 远程桌面客户端（Windows）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-dialog": "^2.0.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "vite": "^5.4.10"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "modelVersion": "5.0.0",
+  "name": "remotedesk",
+  "version": "0.1.0",
+  "description": "RemoteDesk HarmonyOS client",
+  "main": "",
+  "author": "remotedesk",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {}
+}

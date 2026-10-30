@@ -1,0 +1,21 @@
+# 统一换行符：源码一律 LF 入库，避免 Windows 上误改整份文件
+* text=auto eol=lf
+
+# Windows 脚本按 CRLF 检出（cmd/PowerShell 更稳妥）
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 二进制文件不做任何转换
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.jar   binary
+*.so    binary
+*.node  binary
+*.apk   binary
+*.hap   binary
+*.exe   binary
+*.dll   binary
+*.lib   binary
+*.db    binary

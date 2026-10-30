@@ -64,7 +64,10 @@ remotedesk/
 ├─ harmony/                HarmonyOS 客户端（ArkTS + ArkWeb 内 WebRTC 桥接）
 │  └─ entry/src/main/ets/{pages/Index.ets, common/*.ets}
 │     entry/src/main/resources/rawfile/rdwebrtc.html
-├─ docs/protocol.md        协议规范（三端共同遵循，改协议先改这份）
+├─ docs/                   设计与构建文档
+│  ├─ architecture.md      架构设计（含"已知限制"）
+│  ├─ protocol.md          协议规范（三端共同遵循，改协议先改这份）
+│  └─ build-{windows,android,harmony}.md  各端构建与排错
 ├─ scripts/                构建与测试脚本
 │  ├─ build-server.sh      交叉编译 5 平台服务器
 │  ├─ build-windows.ps1    打包 EXE / MSI
@@ -72,23 +75,25 @@ remotedesk/
 │  ├─ build-harmony.ps1    打包 HAP（调用 DevEco 的 hvigor）
 │  ├─ e2e-test.mjs         服务器端到端集成测试（40 项断言）
 │  └─ smoke.ps1            本地起服务器 + 跑 e2e
-└─ dist/                   构建产物输出目录
+└─ README.md
 ```
+
+> 仓库只收录**源码与构建脚本**。编译产物（`dist/`、`windows/src-tauri/target/`、
+> `android/app/build/`、`harmony/**/build/`、`node_modules/`）与 `local.properties`
+> 等本机配置均由 `.gitignore` 排除，不进入版本库。
 
 ---
 
-## 已验证的构建产物
+## 构建产物
 
-以下文件已在本项目开发过程中**真实编译通过并归档**在 `dist/`，可直接取用：
+源码编译后可得到三端客户端与服务器二进制，产物不进入版本库，需要时自行构建：
 
-| 文件 | 大小 | 说明 |
+| 平台 | 构建命令 | 产物 |
 | --- | --- | --- |
-| `dist/server/remotedesk-server-windows-amd64.exe` | 10.0 MB | 服务器 · Windows x64 |
-| `dist/server/remotedesk-server-linux-amd64` | 9.8 MB | 服务器 · Linux x64 |
-| `dist/server/remotedesk-server-linux-arm64` | 9.3 MB | 服务器 · Linux ARM64（树莓派 / 鲲鹏） |
-| `dist/server/remotedesk-server-darwin-arm64` | 9.6 MB | 服务器 · macOS Apple Silicon |
-| `dist/windows/remotedesk-0.1.0-windows-x64.exe` | 6.1 MB | Windows 客户端（免安装单文件） |
-| `dist/android/remotedesk-0.1.0-debug.apk` | 48.3 MB | Android 客户端（debug 签名，可直接安装） |
+| 服务器 | `scripts/build-server.sh` | `dist/server/remotedesk-server-<os>-<arch>` |
+| Windows | `scripts/build-windows.ps1` | `windows/src-tauri/target/release/remotedesk.exe`（另有 `bundle/` 下的 NSIS/MSI） |
+| Android | `scripts/build-android.ps1` | `android/app/build/outputs/apk/debug/app-debug.apk` |
+| HarmonyOS | `scripts/build-harmony.ps1` | `dist/harmony/remotedesk-0.1.0-harmony-<tag>.hap` |
 
 HarmonyOS 的 `.hap` 需要 DevEco Studio（或 hvigor 命令行）构建，见
 [docs/build-harmony.md](docs/build-harmony.md)；仓库内已包含可直接导入的完整工程。

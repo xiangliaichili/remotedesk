@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>remotedesk</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <!-- 登录 / 注册 -->
+    <section id="view-auth" class="view">
+      <div class="auth-card">
+        <h1 class="brand">remotedesk</h1>
+        <p class="subtitle">远程桌面 · 简洁连接</p>
+        <label class="field">
+          <span>服务器地址</span>
+          <input id="server-url" placeholder="https://rd.example.com" />
+        </label>
+        <label class="field">
+          <span>账号</span>
+          <input id="username" autocomplete="username" placeholder="用户名" />
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input id="password" type="password" autocomplete="current-password" placeholder="密码" />
+        </label>
+        <div class="row-btns">
+          <button id="btn-login" class="btn primary">登录</button>
+          <button id="btn-register" class="btn">注册</button>
+        </div>
+        <p id="auth-error" class="error"></p>
+        <p class="hint" id="device-hint"></p>
+      </div>
+    </section>
+
+    <!-- 主界面：设备列表 -->
+    <section id="view-home" class="view hidden">
+      <header class="topbar">
+        <span class="brand small">remotedesk</span>
+        <span id="conn-state" class="dot offline" title="信令状态"></span>
+        <span class="spacer"></span>
+        <span id="self-name" class="muted"></span>
+        <button id="btn-settings" class="btn ghost" title="设置">设置</button>
+        <button id="btn-logout" class="btn ghost">退出</button>
+      </header>
+
+      <main class="home-main">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>我的设备</h2>
+            <button id="btn-refresh" class="btn small">刷新</button>
+          </div>
+          <ul id="device-list" class="device-list"></ul>
+          <p id="devices-empty" class="muted hidden">暂无其他在线设备</p>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>统一链接</h2></div>
+          <p class="muted small">让其他设备通过一次性链接控制本机（10 分钟有效，使用一次即失效）</p>
+          <button id="btn-gen-link" class="btn primary wide">生成控制链接</button>
+          <div id="link-box" class="link-box hidden">
+            <div class="link-code" id="link-code">------</div>
+            <div class="muted small" id="link-expire"></div>
+            <button id="btn-copy-link" class="btn small">复制</button>
+          </div>
+          <hr class="sep" />
+          <p class="muted small">输入他人的链接码以控制对方</p>
+          <div class="row">
+            <input id="link-input" placeholder="输入 8 位链接码" />
+            <button id="btn-use-link" class="btn">连接</button>
+          </div>
+        </div>
+      </main>
+    </section>
+
+    <!-- 远程控制视图 -->
+    <section id="view-remote" class="view hidden">
+      <div class="remote-toolbar">
+        <span class="dot online"></span>
+        <span id="remote-title" class="muted">远程控制中</span>
+        <span class="spacer"></span>
+        <button id="btn-quality" class="btn ghost small">画质：均衡</button>
+        <button id="btn-send-file" class="btn ghost small">发送文件</button>
+        <button id="btn-fullscreen" class="btn ghost small">全屏</button>
+        <button id="btn-end" class="btn danger small">结束控制</button>
+      </div>
+      <div id="remote-stage" class="remote-stage" tabindex="0">
+        <video id="remote-video" autoplay playsinline muted></video>
+        <div id="remote-overlay" class="overlay"></div>
+      </div>
+      <div class="transfer-bar hidden" id="transfer-bar">
+        <span id="transfer-name"></span>
+        <progress id="transfer-progress" max="100" value="0"></progress>
+        <span id="transfer-pct"></span>
+      </div>
+    </section>
+
+    <!-- 被控端提示弹窗 -->
+    <div id="control-toast" class="toast hidden">
+      <div class="toast-body">
+        <p id="toast-text">正在被远程控制</p>
+        <button id="toast-cancel" class="btn danger small">取消控制</button>
+      </div>
+    </div>
+
+    <!-- 请求控制弹窗（被控端） -->
+    <div id="req-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>远程控制请求</h3>
+        <p id="req-text" class="muted"></p>
+        <div class="row-btns">
+          <button id="req-deny" class="btn">拒绝</button>
+          <button id="req-accept" class="btn primary">同意</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 设置弹窗 -->
+    <div id="settings-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>设置</h3>
+        <label class="switch">
+          <input id="set-auto-accept" type="checkbox" />
+          <span>同账号设备免同意连接（仍会有控制提示，可随时取消）</span>
+        </label>
+        <label class="switch">
+          <input id="set-mic" type="checkbox" />
+          <span>允许远程开启麦克风</span>
+        </label>
+        <label class="switch">
+          <input id="set-camera" type="checkbox" />
+          <span>允许远程开启摄像头</span>
+        </label>
+        <div class="row-btns">
+          <button id="settings-close" class="btn primary">完成</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="edit-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3 id="edit-title">编辑</h3>
+        <input id="edit-input" />
+        <div class="row-btns">
+          <button id="edit-cancel" class="btn">取消</button>
+          <button id="edit-ok" class="btn primary">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

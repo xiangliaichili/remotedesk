@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
+<title>RemoteDesk WebRTC</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+  #wrap { position: fixed; inset: 0; background: #000; }
+  #v { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+  #c { display: none; }
+  #hint {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    color: #8B97A6; font: 14px/1.6 -apple-system, "HarmonyOS Sans", sans-serif;
+    text-align: center; pointer-events: none; white-space: pre-line;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="v" autoplay playsinline muted></video>
+  <canvas id="c" width="2" height="2"></canvas>
+  <div id="hint">正在建立连接…</div>
+</div>
+<script>
+(function () {
+  'use strict';
+
+  var CHUNK = 48 * 1024;
+  var BITRATE = { low: 800000, normal: 2000000, high: 5000000 };
+
+  var video = document.getElementById('v');
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d', { alpha: false });
+  var hint = document.getElementById('hint');
+
+  var S = {
+    role: 'controller',
+    sessionId: '',
+    peer: '',
+    turn: null,
+    quality: 'normal',
+    pc: null,
+    stream: null,
+    localSize: null,
+    peerSize: null,
+    dcControl: null,
+    dcMeta: null,
+    dcFile: null,
+    pendingCandidates: [],
+    closed: false,
+    // 被控端帧渲染
+    frameBusy: false,
+    frameQueue: 0,
+    // 文件接收
+    rx: {},
+    // 文件发送
+    tx: null
+  };
+
+  function post(obj) {
+    try {
+      if (window.rdNative && window.rdNative.postMessage) {
+        window.rdNative.postMessage(JSON.stringify(obj));
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  function setHint(text) {
+    hint.textContent = text || '';
+    hint.style.display = text ? 'block' : 'none';
+  }
+
+  function parseTurn(turn) {
+    var servers = [];
+    if (!turn || !turn.urls || !turn.urls.length) return servers;
+    var urls = [];
+    for (var i = 0; i < turn.urls.length; i++) {
+      var u = turn.urls[i];
+      if (typeof u === 'string' && u) urls.push(u);
+    }
+    if (!urls.length) return servers;
+    if (turn.username) {
+      // 只有 turn: 前缀的地址才需要凭证，stun 地址一并带上也无副作用
+      servers.push({ urls: urls, username: turn.username, credential: turn.credential || '' });
+    } else {
+      servers.push({ urls: urls });
+    }
+    return servers;
+  }
+
+  function newPeerConnection() {
+    var cfg = {
+      iceServers: parseTurn(S.turn),
+      iceTransportPolicy: 'all',
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
+      iceCandidatePoolSize: 0
+    };
+    var pc = new RTCPeerConnection(cfg);
+
+    pc.onicecandidate = function (ev) {
+      if (ev.candidate) {
+        post({ t: 'signal', kind: 'ice', candidate: JSON.stringify(ev.candidate) });
+      }
+    };
+
+    pc.oniceconnectionstatechange = function () {
+      post({ t: 'ice', state: pc.iceConnectionState });
+      if (pc.iceConnectionState === 'failed') {
+        post({ t: 'toast', text: '网络不通，尝试重新协商' });
+        try { pc.restartIce(); } catch (e) { /* ignore */ }
+      }
+    };
+
+    pc.onconnectionstatechange = function () {
+      post({ t: 'state', state: pc.connectionState });
+      if (pc.connectionState === 'connected') setHint('');
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        setHint('连接已断开');
+      }
+    };
+
+    pc.ontrack = function (ev) {
+      var streams = ev.streams;
+      if (streams && streams.length) {
+        video.srcObject = streams[0];
+      } else {
+        if (!S.stream) { S.stream = new MediaStream(); video.srcObject = S.stream; }
+        S.stream.addTrack(ev.track);
+      }
+      video.play().catch(function () { /* autoplay muted 通常允许 */ });
+      setHint('');
+      post({ t: 'remote_track' });
+    };
+
+    return pc;
+  }
+
+  // ---------------- 数据通道 ----------------
+
+  function wireChannel(ch) {
+    ch.binaryType = 'arraybuffer';
+    var label = ch.label;
+    if (label === 'control') S.dcControl = ch;
+    else if (label === 'meta') S.dcMeta = ch;
+    else if (label === 'file') S.dcFile = ch;
+
+    ch.onopen = function () {
+      if (label === 'meta') announceScreen();
+      post({ t: 'channel', label: label, open: true });
+    };
+    ch.onclose = function () {
+      post({ t: 'channel', label: label, open: false });
+    };
+    ch.onerror = function () { /* ignore */ };
+
+    if (label === 'file') {
+      ch.onmessage = function (ev) { onFileBinary(ev.data); };
+    } else {
+      ch.onmessage = function (ev) {
+        if (typeof ev.data !== 'string') return;
+        var msg = null;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        if (label === 'control') {
+          post({ t: 'input', evt: msg });
+        } else if (label === 'meta') {
+          onMeta(msg);
+        }
+      };
+    }
+  }
+
+  function createChannels() {
+    wireChannel(S.pc.createDataChannel('control', { ordered: true }));
+    wireChannel(S.pc.createDataChannel('file', { ordered: true }));
+    wireChannel(S.pc.createDataChannel('meta', { ordered: true }));
+  }
+
+  function sendMeta(obj) {
+    if (S.dcMeta && S.dcMeta.readyState === 'open') {
+      try { S.dcMeta.send(JSON.stringify(obj)); return true; } catch (e) { return false; }
+    }
+    return false;
+  }
+
+  function announceScreen() {
+    if (S.role !== 'controlled') return;
+    if (!S.localSize) return;
+    sendMeta({ t: 'screen', w: S.localSize.w, h: S.localSize.h });
+  }
+
+  // ---------------- meta 消息 ----------------
+
+  function onMeta(msg) {
+    if (!msg || !msg.t) return;
+    if (msg.t === 'screen') {
+      S.peerSize = { w: msg.w, h: msg.h };
+      post({ t: 'peer_screen', w: msg.w, h: msg.h });
+      return;
+    }
+    if (msg.t === 'file_offer') {
+      // 被控端/控制端都可能收到：交给原生落盘
+      S.rx[msg.id] = { name: msg.name, size: msg.size, received: 0 };
+      post({ t: 'file_begin', id: msg.id, name: msg.name, size: msg.size });
+      // 等原生 RD.fileOpened(id, ok)
+      return;
+    }
+    if (msg.t === 'file_accept') {
+      if (S.tx && S.tx.id === msg.id) {
+        S.tx.offset = 0;
+        S.tx.active = true;
+        post({ t: 'need_chunk', id: S.tx.id, offset: 0, len: CHUNK });
+      }
+      return;
+    }
+    if (msg.t === 'file_done') {
+      var rx = S.rx[msg.id];
+      if (rx) {
+        post({ t: 'file_end', id: msg.id });
+        delete S.rx[msg.id];
+      }
+      return;
+    }
+    if (msg.t === 'file_ack') {
+      if (S.tx && S.tx.id === msg.id) {
+        post({ t: 'toast', text: msg.ok ? '文件已发送' : '文件发送失败' });
+        post({ t: 'tx_done', id: S.tx.id, ok: !!msg.ok });
+        S.tx = null;
+      }
+      return;
+    }
+    if (msg.t === 'file_progress') return;
+    post({ t: 'meta', msg: msg });
+  }
+
+  function onFileBinary(buf) {
+    // 二进制块归属当前唯一一个接收中的文件
+    var ids = Object.keys(S.rx);
+    if (!ids.length) return;
+    var id = ids[0];
+    var rx = S.rx[id];
+    var bytes = new Uint8Array(buf);
+    var b64 = bytesToB64(bytes);
+    rx.received += bytes.length;
+    post({ t: 'file_chunk', id: id, offset: rx.received - bytes.length, b64: b64 });
+  }
+
+  function bytesToB64(bytes) {
+    var chunk = 0x8000;
+    var out = '';
+    for (var i = 0; i < bytes.length; i += chunk) {
+      out += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(out);
+  }
+
+  function b64ToBytes(b64) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  // ---------------- 信令 ----------------
+
+  function flushCandidates() {
+    while (S.pendingCandidates.length) {
+      var c = S.pendingCandidates.shift();
+      S.pc.addIceCandidate(c).catch(function () { /* ignore */ });
+    }
+  }
+
+  function handleSignal(msg) {
+    if (!msg) return;
+    if (msg.kind === 'ice' && msg.candidate) {
+      var cand = null;
+      try { cand = JSON.parse(msg.candidate); } catch (e) { return; }
+      if (!S.pc) return;
+      if (!S.pc.remoteDescription || !S.pc.remoteDescription.type) {
+        S.pendingCandidates.push(cand);
+      } else {
+        S.pc.addIceCandidate(cand).catch(function () { /* ignore */ });
+      }
+      return;
+    }
+
+    if (msg.kind === 'offer') {
+      S.pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp }).then(function () {
+        flushCandidates();
+        return S.pc.createAnswer();
+      }).then(function (answer) {
+        return S.pc.setLocalDescription(answer);
+      }).then(function () {
+        post({ t: 'signal', kind: 'answer', sdp: S.pc.localDescription.sdp });
+      }).catch(function (e) {
+        post({ t: 'toast', text: '协商失败：' + e.message });
+      });
+      return;
+    }
+
+    if (msg.kind === 'answer') {
+      S.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).then(function () {
+        flushCandidates();
+      }).catch(function (e) {
+        post({ t: 'toast', text: '协商失败：' + e.message });
+      });
+    }
+  }
+
+  // ---------------- 被控端：帧渲染 ----------------
+
+  function drawFrame(b64, w, h) {
+    if (S.closed) return;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, w, h);
+      S.localSize = { w: w, h: h };
+      announceScreen();
+    }
+    if (S.frameBusy) {
+      // 丢帧保实时
+      S.frameQueue++;
+      if (S.frameQueue > 30) S.frameQueue = 0;
+      return;
+    }
+    S.frameBusy = true;
+    var img = new Image();
+    img.onload = function () {
+      try { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); } catch (e) { /* ignore */ }
+      S.frameBusy = false;
+    };
+    img.onerror = function () { S.frameBusy = false; };
+    img.src = 'data:image/jpeg;base64,' + b64;
+  }
+
+  function startCanvasCapture() {
+    if (S.role !== 'controlled') return;
+    if (S.stream) return;
+    try {
+      S.stream = canvas.captureStream(15);
+      var track = S.stream.getVideoTracks()[0];
+      if (track) {
+        S.pc.addTrack(track, S.stream);
+        post({ t: 'capture_started' });
+      }
+    } catch (e) {
+      post({ t: 'toast', text: '画面采集初始化失败：' + e.message });
+    }
+  }
+
+  function applyBitrate() {
+    if (!S.pc) return;
+    var rate = BITRATE[S.quality] || BITRATE.normal;
+    S.pc.getSenders().forEach(function (sender) {
+      if (!sender.track || sender.track.kind !== 'video') return;
+      try {
+        var params = sender.getParameters();
+        if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+        params.encodings[0].maxBitrate = rate;
+        sender.setParameters(params).catch(function () { /* ignore */ });
+      } catch (e) { /* ignore */ }
+    });
+  }
+
+  // ---------------- 输入（控制端） ----------------
+
+  function displayRect() {
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    var pw = S.peerSize ? S.peerSize.w : (video.videoWidth || vw);
+    var ph = S.peerSize ? S.peerSize.h : (video.videoHeight || vh);
+    if (!pw || !ph) return { x: 0, y: 0, w: vw, h: vh };
+    var viewAspect = vw / vh;
+    var frameAspect = pw / ph;
+    var dw, dh, ox, oy;
+    if (viewAspect > frameAspect) {
+      dh = vh; dw = vh * frameAspect; ox = (vw - dw) / 2; oy = 0;
+    } else {
+      dw = vw; dh = vw / frameAspect; ox = 0; oy = (vh - dh) / 2;
+    }
+    return { x: ox, y: oy, w: dw, h: dh };
+  }
+
+  function norm(x, y) {
+    var r = displayRect();
+    var nx = (x - r.x) / r.w;
+    var ny = (y - r.y) / r.h;
+    nx = Math.min(1, Math.max(0, nx));
+    ny = Math.min(1, Math.max(0, ny));
+    return { x: Math.round(nx * 10000) / 10000, y: Math.round(ny * 10000) / 10000 };
+  }
+
+  function sendInput(obj) {
+    if (S.dcControl && S.dcControl.readyState === 'open') {
+      try { S.dcControl.send(JSON.stringify(obj)); return true; } catch (e) { return false; }
+    }
+    return false;
+  }
+
+  var touchState = { down: false, id: 0, lastX: 0, lastY: 0, lastTap: 0 };
+
+  function bindInput() {
+    var wrap = document.getElementById('wrap');
+
+    wrap.addEventListener('touchstart', function (e) {
+      if (S.role !== 'controller') return;
+      var t = e.touches[0];
+      if (!t) return;
+      var p = norm(t.clientX, t.clientY);
+      touchState.down = true;
+      touchState.lastX = p.x;
+      touchState.lastY = p.y;
+      sendInput({ type: 'mouse_down', x: p.x, y: p.y, button: 0 });
+      e.preventDefault();
+    }, { passive: false });
+
+    wrap.addEventListener('touchmove', function (e) {
+      if (S.role !== 'controller' || !touchState.down) return;
+      var t = e.touches[0];
+      if (!t) return;
+      var p = norm(t.clientX, t.clientY);
+      if (Math.abs(p.x - touchState.lastX) > 0.001 || Math.abs(p.y - touchState.lastY) > 0.001) {
+        touchState.lastX = p.x;
+        touchState.lastY = p.y;
+        sendInput({ type: 'mouse_move', x: p.x, y: p.y });
+      }
+      e.preventDefault();
+    }, { passive: false });
+
+    function endTouch(e) {
+      if (S.role !== 'controller' || !touchState.down) return;
+      touchState.down = false;
+      sendInput({ type: 'mouse_up', x: touchState.lastX, y: touchState.lastY, button: 0 });
+      var now = Date.now();
+      if (now - touchState.lastTap < 280) {
+        sendInput({ type: 'mouse_down', x: touchState.lastX, y: touchState.lastY, button: 0 });
+        sendInput({ type: 'mouse_up', x: touchState.lastX, y: touchState.lastY, button: 0 });
+      }
+      touchState.lastTap = now;
+      e.preventDefault();
+    }
+
+    wrap.addEventListener('touchend', endTouch, { passive: false });
+    wrap.addEventListener('touchcancel', function (e) {
+      if (!touchState.down) return;
+      touchState.down = false;
+      sendInput({ type: 'mouse_up', x: touchState.lastX, y: touchState.lastY, button: 0 });
+      e.preventDefault();
+    }, { passive: false });
+
+    // 双指上下滑动 = 滚轮
+    wrap.addEventListener('touchmove', function (e) {
+      if (S.role !== 'controller') return;
+      if (e.touches.length !== 2) return;
+      var y0 = e.touches[0].clientY;
+      var y1 = e.touches[1].clientY;
+      var mid = (y0 + y1) / 2;
+      if (touchState.scrollLast !== undefined) {
+        var dy = mid - touchState.scrollLast;
+        if (Math.abs(dy) > 6) {
+          sendInput({ type: 'mouse_wheel', dx: 0, dy: dy > 0 ? 1 : -1 });
+          touchState.scrollLast = mid;
+        }
+      } else {
+        touchState.scrollLast = mid;
+      }
+      e.preventDefault();
+    }, { passive: false });
+
+    wrap.addEventListener('touchend', function () { touchState.scrollLast = undefined; }, { passive: true });
+  }
+
+  // ---------------- 对外 API ----------------
+
+  window.RD = {
+    init: function (opts) {
+      S.role = opts.role === 'controlled' ? 'controlled' : 'controller';
+      S.sessionId = opts.sessionId || '';
+      S.peer = opts.peer || '';
+      S.turn = opts.turn || null;
+      S.quality = opts.quality || 'normal';
+      S.closed = false;
+      setHint(S.role === 'controlled' ? '等待对方连接…' : '正在建立连接…');
+
+      if (!window.RTCPeerConnection) {
+        post({ t: 'toast', text: '当前 WebView 不支持 WebRTC' });
+        return;
+      }
+
+      S.pc = newPeerConnection();
+
+      if (S.role === 'controller') {
+        createChannels();
+        S.pc.createOffer().then(function (offer) {
+          return S.pc.setLocalDescription(offer);
+        }).then(function () {
+          applyBitrate();
+          post({ t: 'signal', kind: 'offer', sdp: S.pc.localDescription.sdp });
+          post({ t: 'ready' });
+        }).catch(function (e) {
+          post({ t: 'toast', text: '发起连接失败：' + e.message });
+        });
+      } else {
+        S.pc.ondatachannel = function (ev) { wireChannel(ev.channel); };
+        startCanvasCapture();
+        post({ t: 'ready' });
+      }
+    },
+
+    signal: function (msg) { handleSignal(msg); },
+
+    frame: function (b64, w, h) { drawFrame(b64, w, h); },
+
+    sendInput: function (obj) { sendInput(obj); },
+
+    setQuality: function (q) {
+      S.quality = q;
+      applyBitrate();
+    },
+
+    // ---- 发送文件（由原生驱动分块）----
+    startSendFile: function (id, name, size) {
+      S.tx = { id: id, name: name, size: size, offset: 0, active: false };
+      sendMeta({ t: 'file_offer', id: id, name: name, size: size });
+    },
+
+    pushChunk: function (b64) {
+      if (!S.tx || !S.dcFile || S.dcFile.readyState !== 'open') return;
+      var bytes = b64ToBytes(b64);
+      var send = function () {
+        if (S.dcFile.bufferedAmount > 1024 * 1024) {
+          setTimeout(send, 15);
+          return;
+        }
+        try { S.dcFile.send(bytes); } catch (e) { return; }
+        S.tx.offset += bytes.length;
+        if (S.tx.offset >= S.tx.size) {
+          sendMeta({ t: 'file_done', id: S.tx.id });
+        } else {
+          post({ t: 'need_chunk', id: S.tx.id, offset: S.tx.offset, len: CHUNK });
+        }
+      };
+      send();
+    },
+
+    // ---- 接收文件：原生写好一块后回调 ----
+    fileOpened: function (id, ok) {
+      var rx = S.rx[id];
+      if (!rx) return;
+      if (!ok) {
+        delete S.rx[id];
+        post({ t: 'toast', text: '无法创建接收文件' });
+        return;
+      }
+      sendMeta({ t: 'file_accept', id: id });
+    },
+
+    fileClosed: function (id) {
+      sendMeta({ t: 'file_ack', id: id, ok: true });
+    },
+
+    close: function () {
+      S.closed = true;
+      try { if (S.pc) S.pc.close(); } catch (e) { /* ignore */ }
+      S.pc = null;
+      video.srcObject = null;
+      setHint('已结束');
+    },
+
+    state: function () { return JSON.stringify({ peerSize: S.peerSize, localSize: S.localSize, quality: S.quality }); }
+  };
+
+  bindInput();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+# remotedesk 一键部署（Docker）
+# 使用 host 网络以便 TURN(UDP 3478) 能正确绑定公网地址。
+# 用法：cp .env.example .env && 编辑 .env 填入域名公网地址，然后 docker compose up -d
+services:
+  remotedesk:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      RD_LISTEN: ":8443"
+      RD_PUBLIC: "${RD_PUBLIC:-http://127.0.0.1:8443}"
+      RD_TURN_LISTEN: ":3478"
+      RD_TURN_RELAY_IP: "${RD_TURN_RELAY_IP:-}"
+      RD_DB: "/data/remotedesk.db"
+      RD_JWT_SECRET: "${RD_JWT_SECRET:-change-me-in-production}"
+    volumes:
+      - ./data:/data
+      - ./data/caddy:/root/.local/share/caddy:ro
+
+  caddy:
+    image: caddy:2-alpine
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - remotedesk
+    environment:
+      RD_DOMAIN: "${RD_DOMAIN:-localhost}"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy_data:/data
+      - ./data/caddy_config:/config

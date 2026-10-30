@@ -1,0 +1,640 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg">
+
+    <!-- ============ 登录 / 注册 ============ -->
+    <LinearLayout
+        android:id="@+id/screenAuth"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="28dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/bg_card"
+            android:padding="22dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="remotedesk"
+                android:textColor="@color/fg"
+                android:textSize="26sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="远程桌面 · 简洁连接"
+                android:textColor="@color/muted"
+                android:textSize="13sp"
+                android:layout_marginBottom="18dp" />
+
+            <EditText
+                android:id="@+id/etServer"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="@drawable/bg_input"
+                android:paddingHorizontal="12dp"
+                android:hint="@string/hint_server"
+                android:textColor="@color/fg"
+                android:textColorHint="@color/muted"
+                android:inputType="textUri"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/etUser"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_input"
+                android:paddingHorizontal="12dp"
+                android:hint="@string/hint_username"
+                android:textColor="@color/fg"
+                android:textColorHint="@color/muted"
+                android:inputType="text"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/etPass"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_input"
+                android:paddingHorizontal="12dp"
+                android:hint="@string/hint_password"
+                android:textColor="@color/fg"
+                android:textColorHint="@color/muted"
+                android:inputType="textPassword"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="16dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnLogin"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:backgroundTint="@color/accent2"
+                    android:text="@string/btn_login"
+                    android:textColor="@color/white" />
+
+                <Button
+                    android:id="@+id/btnRegister"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:layout_marginStart="10dp"
+                    android:text="@string/btn_register" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvAuthError"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:textColor="@color/danger"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/tvDeviceHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:textColor="@color/muted"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- ============ 主页 ============ -->
+    <LinearLayout
+        android:id="@+id/screenHome"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="16dp"
+            android:background="@color/panel2">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="remotedesk"
+                android:textColor="@color/fg"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <View
+                android:id="@+id/dotState"
+                android:layout_width="9dp"
+                android:layout_height="9dp"
+                android:layout_marginStart="10dp"
+                android:background="@color/muted" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/tvSelf"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/muted"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btnSettings"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/btn_settings"
+                android:textColor="@color/fg"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btnLogout"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/btn_logout"
+                android:textColor="@color/muted"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:fillViewport="true">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:background="@drawable/bg_card"
+                    android:padding="16dp">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/title_my_devices"
+                            android:textColor="@color/fg"
+                            android:textSize="15sp"
+                            android:textStyle="bold" />
+
+                        <Button
+                            android:id="@+id/btnRefresh"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/btn_refresh"
+                            android:textColor="@color/accent"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:id="@+id/deviceList"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical" />
+
+                    <TextView
+                        android:id="@+id/tvNoDevices"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="暂无其他在线设备"
+                        android:textColor="@color/muted"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:orientation="vertical"
+                    android:background="@drawable/bg_card"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/title_link"
+                        android:textColor="@color/fg"
+                        android:textSize="15sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="生成一次性链接，让对方免登录控制本机（10 分钟，使用一次失效）"
+                        android:textColor="@color/muted"
+                        android:textSize="12sp" />
+
+                    <Button
+                        android:id="@+id/btnGenLink"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="12dp"
+                        android:backgroundTint="@color/accent2"
+                        android:text="@string/btn_generate_link"
+                        android:textColor="@color/white" />
+
+                    <TextView
+                        android:id="@+id/tvLinkCode"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:gravity="center"
+                        android:textColor="@color/accent"
+                        android:textSize="28sp"
+                        android:textStyle="bold"
+                        android:letterSpacing="0.2"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/tvLinkExpire"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:textColor="@color/muted"
+                        android:textSize="12sp" />
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:layout_marginVertical="14dp"
+                        android:background="@color/line" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="输入他人的链接码控制对方"
+                        android:textColor="@color/muted"
+                        android:textSize="12sp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="8dp"
+                        android:orientation="horizontal">
+
+                        <EditText
+                            android:id="@+id/etLink"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1"
+                            android:background="@drawable/bg_input"
+                            android:paddingHorizontal="12dp"
+                            android:hint="@string/hint_link"
+                            android:textColor="@color/fg"
+                            android:textColorHint="@color/muted"
+                            android:inputType="textCapCharacters"
+                            android:maxLength="8"
+                            android:textSize="14sp" />
+
+                        <Button
+                            android:id="@+id/btnUseLink"
+                            android:layout_width="wrap_content"
+                            android:layout_height="match_parent"
+                            android:layout_marginStart="8dp"
+                            android:text="@string/btn_connect" />
+                    </LinearLayout>
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:layout_marginVertical="14dp"
+                        android:background="@color/line" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="用对方账号密码控制对方设备"
+                        android:textColor="@color/muted"
+                        android:textSize="12sp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="8dp"
+                        android:orientation="horizontal">
+
+                        <EditText
+                            android:id="@+id/etPeerUser"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1"
+                            android:background="@drawable/bg_input"
+                            android:paddingHorizontal="12dp"
+                            android:hint="@string/hint_peer_user"
+                            android:textColor="@color/fg"
+                            android:textColorHint="@color/muted"
+                            android:inputType="text"
+                            android:textSize="14sp" />
+
+                        <EditText
+                            android:id="@+id/etPeerPass"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1"
+                            android:layout_marginStart="8dp"
+                            android:background="@drawable/bg_input"
+                            android:paddingHorizontal="12dp"
+                            android:hint="@string/hint_peer_pass"
+                            android:textColor="@color/fg"
+                            android:textColorHint="@color/muted"
+                            android:inputType="textPassword"
+                            android:textSize="14sp" />
+                    </LinearLayout>
+
+                    <Button
+                        android:id="@+id/btnPeerConnect"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="10dp"
+                        android:backgroundTint="@color/accent2"
+                        android:text="@string/btn_peer_connect"
+                        android:textColor="@color/white" />
+                </LinearLayout>
+            </LinearLayout>
+        </ScrollView>
+    </LinearLayout>
+
+    <!-- ============ 远程视图 ============ -->
+    <LinearLayout
+        android:id="@+id/screenRemote"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:background="#000000"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="12dp"
+            android:background="@color/panel2">
+
+            <TextView
+                android:id="@+id/tvRemoteTitle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="远程控制中"
+                android:textColor="@color/fg"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btnKeyboard"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/btn_keyboard"
+                android:textColor="@color/fg"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btnSendFile"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/btn_send_file"
+                android:textColor="@color/fg"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btnEnd"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/btn_end"
+                android:textColor="@color/danger"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <org.webrtc.SurfaceViewRenderer
+            android:id="@+id/remoteRenderer"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="10dp"
+            android:background="@color/panel2">
+
+            <TextView
+                android:id="@+id/tvTransfer"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="@color/muted"
+                android:textSize="11sp" />
+
+            <ProgressBar
+                android:id="@+id/progress"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="120dp"
+                android:layout_height="6dp"
+                android:max="100" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- ============ 被控提示条（可随时取消） ============ -->
+    <LinearLayout
+        android:id="@+id/controlBanner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:layout_margin="12dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@drawable/bg_card"
+        android:padding="12dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tvBanner"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/notif_controlling"
+            android:textColor="@color/fg"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/btnCancelControl"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:backgroundTint="@color/danger"
+            android:text="@string/btn_cancel_control"
+            android:textColor="@color/white"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <!-- ============ 控制请求弹窗 ============ -->
+    <LinearLayout
+        android:id="@+id/reqDialog"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#CC000000"
+        android:gravity="center"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_margin="32dp"
+            android:orientation="vertical"
+            android:background="@drawable/bg_card"
+            android:padding="22dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="远程控制请求"
+                android:textColor="@color/fg"
+                android:textSize="17sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvReqText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:textColor="@color/muted"
+                android:textSize="13sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="18dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnDeny"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:text="@string/btn_deny" />
+
+                <Button
+                    android:id="@+id/btnAccept"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:layout_marginStart="10dp"
+                    android:backgroundTint="@color/accent2"
+                    android:text="@string/btn_accept"
+                    android:textColor="@color/white" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- ============ 设置弹窗 ============ -->
+    <LinearLayout
+        android:id="@+id/settingsDialog"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#CC000000"
+        android:gravity="center"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_margin="28dp"
+            android:orientation="vertical"
+            android:background="@drawable/bg_card"
+            android:padding="22dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/title_settings"
+                android:textColor="@color/fg"
+                android:textSize="17sp"
+                android:textStyle="bold" />
+
+            <CheckBox
+                android:id="@+id/cbAutoAccept"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/setting_auto_accept"
+                android:textColor="@color/fg"
+                android:textSize="13sp" />
+
+            <CheckBox
+                android:id="@+id/cbMic"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/setting_mic"
+                android:textColor="@color/fg"
+                android:textSize="13sp" />
+
+            <CheckBox
+                android:id="@+id/cbCamera"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/setting_camera"
+                android:textColor="@color/fg"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btnAccessibility"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:layout_marginTop="10dp"
+                android:text="@string/setting_accessibility"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btnSettingsDone"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_marginTop="16dp"
+                android:backgroundTint="@color/accent2"
+                android:text="完成"
+                android:textColor="@color/white" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

@@ -1,0 +1,5 @@
+# remotedesk 反向代理配置（Caddy v2，自动申请 HTTPS 证书并支持 WebSocket）
+{$RD_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8443
+}

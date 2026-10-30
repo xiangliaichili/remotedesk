@@ -1,0 +1,58 @@
+{
+  "string": [
+    { "name": "module_desc", "value": "远程桌面 HarmonyOS 客户端" },
+    { "name": "EntryAbility_desc", "value": "远程桌面" },
+    { "name": "EntryAbility_label", "value": "远程桌面" },
+    { "name": "perm_mic", "value": "远程协助时传输语音" },
+    { "name": "perm_camera", "value": "远程协助时传输摄像头画面" },
+
+    { "name": "app_title", "value": "远程桌面" },
+    { "name": "tab_home", "value": "设备" },
+    { "name": "tab_link", "value": "连接码" },
+    { "name": "tab_settings", "value": "设置" },
+
+    { "name": "hint_server", "value": "服务器地址，例如 https://rd.example.com" },
+    { "name": "hint_username", "value": "账号（至少 3 位）" },
+    { "name": "hint_password", "value": "密码（至少 6 位）" },
+    { "name": "hint_device", "value": "设备名称，例如 我的手机" },
+    { "name": "hint_link", "value": "输入对方提供的 8 位连接码" },
+    { "name": "hint_peer_user", "value": "对方账号" },
+    { "name": "hint_peer_pass", "value": "对方密码" },
+
+    { "name": "btn_login", "value": "登录" },
+    { "name": "btn_register", "value": "注册并登录" },
+    { "name": "btn_logout", "value": "退出登录" },
+    { "name": "btn_refresh", "value": "刷新" },
+    { "name": "btn_connect", "value": "连接" },
+    { "name": "btn_cancel", "value": "取消" },
+    { "name": "btn_end", "value": "结束控制" },
+    { "name": "btn_accept", "value": "同意" },
+    { "name": "btn_deny", "value": "拒绝" },
+    { "name": "btn_send_file", "value": "发送文件" },
+    { "name": "btn_keyboard", "value": "键盘" },
+    { "name": "btn_fullscreen", "value": "全屏" },
+    { "name": "btn_quality", "value": "画质" },
+    { "name": "btn_gen_link", "value": "生成连接码" },
+    { "name": "btn_use_link", "value": "使用连接码连接" },
+    { "name": "btn_peer_connect", "value": "用账号密码连接" },
+    { "name": "btn_save", "value": "保存设置" },
+
+    { "name": "title_my_devices", "value": "我的设备" },
+    { "name": "title_link", "value": "统一连接码" },
+    { "name": "title_peer", "value": "用对方账号密码控制" },
+    { "name": "title_settings", "value": "设置" },
+    { "name": "title_remote", "value": "远程控制" },
+
+    { "name": "setting_auto_accept", "value": "同账号设备免同意连接（仍会弹出控制提示）" },
+    { "name": "setting_mic", "value": "允许传输语音" },
+    { "name": "setting_camera", "value": "允许传输摄像头画面" },
+
+    { "name": "empty_devices", "value": "暂无设备，先在其它端登录同一账号" },
+    { "name": "online", "value": "在线" },
+    { "name": "offline", "value": "离线" },
+    { "name": "waiting_approve", "value": "等待对方同意…" },
+    { "name": "controlled_notice", "value": "正在被他人控制" },
+
+    { "name": "harmony_controlled_unsupported", "value": "HarmonyOS 应用当前作为控制端使用；被控端请使用 Windows 或 Android 客户端" }
+  ]
+}
