@@ -4,6 +4,7 @@ const BASE = process.argv[2] || 'http://127.0.0.1:18443';
 const WS = BASE.replace(/^http/, 'ws') + '/ws';
 
 let failures = 0;
+let skipped = 0;
 function ok(name, cond, extra = '') {
   if (cond) {
     console.log(`  ✓ ${name}`);
@@ -11,6 +12,11 @@ function ok(name, cond, extra = '') {
     failures++;
     console.log(`  ✗ ${name}${extra ? ' — ' + extra : ''}`);
   }
+}
+/** 功能未开启（比如没配微信 AppID）时算跳过，不算失败。 */
+function skip(name, why) {
+  skipped++;
+  console.log(`  ⊘ ${name} — ${why}`);
 }
 
 async function post(path, body, token) {
@@ -345,82 +351,105 @@ async function main() {
 
   // 登录方式自述：客户端据此决定显示哪些入口
   const methods = await get('/api/auth/methods', '');
-  ok('登录方式自述：密码 + 短信 + 微信', methods.status === 200 &&
-    methods.json.password === true && !!methods.json.sms && !!methods.json.wechat,
-    JSON.stringify(methods.json));
-  ok('短信通道处于 dev 模式（响应会回验证码）', methods.json.sms.enabled === true && methods.json.sms.dev === true,
-    JSON.stringify(methods.json.sms));
+  const m = methods.json || {};
+  ok('登录方式自述接口可用', methods.status === 200 && !!m.sms && !!m.wechat,
+    JSON.stringify(m));
+  ok('账号密码登录始终可用', m.password === true, JSON.stringify(m.password));
 
-  const phone = '139' + String(Math.floor(Math.random() * 1e8)).padStart(8, '0');
-  const badPhone = await post('/api/auth/sms/send', { phone: '12345' });
-  ok('手机号格式不合法 → 400', badPhone.status === 400, badPhone.text);
+  // 短信与微信都是可选功能，没配置就不算失败，标记跳过。
+  // 想覆盖这两组，起服务器时带上：
+  //   RD_SMS_PROVIDER=mock RD_SMS_DEV=1
+  //   RD_WECHAT_APP_ID=xxx RD_WECHAT_APP_SECRET=xxx RD_AUTH_DEV=1
+  const smsReady = m.sms && m.sms.enabled === true && m.sms.dev === true;
+  const wxReady = m.wechat && m.wechat.enabled === true && m.wechat.dev === true;
 
-  const sent = await post('/api/auth/sms/send', { phone });
-  ok('发送验证码成功且返回 dev_code', sent.status === 200 && /^\d{6}$/.test(sent.json.dev_code || ''),
-    sent.text);
-  const smsCode = sent.json.dev_code;
+  if (smsReady) {
+    ok('短信通道处于 dev 模式（响应会回验证码）', m.sms.dev === true, JSON.stringify(m.sms));
 
-  const resend = await post('/api/auth/sms/send', { phone });
-  ok('60 秒内重发 → 429 + Retry-After', resend.status === 429, resend.text);
+    const phone = '139' + String(Math.floor(Math.random() * 1e8)).padStart(8, '0');
+    const badPhone = await post('/api/auth/sms/send', { phone: '12345' });
+    ok('手机号格式不合法 → 400', badPhone.status === 400, badPhone.text);
 
-  const wrong = await post('/api/auth/sms/login', {
-    phone, code: smsCode === '000000' ? '111111' : '000000', device_name: 'SMS-Phone', os: 'android',
-  });
-  ok('验证码错误 → 401 且提示剩余次数', wrong.status === 401 && /还可尝试/.test(wrong.text || ''), wrong.text);
+    const sent = await post('/api/auth/sms/send', { phone });
+    ok('发送验证码成功且返回 dev_code', sent.status === 200 && /^\d{6}$/.test(sent.json.dev_code || ''),
+      sent.text);
+    const smsCode = sent.json.dev_code;
 
-  const smsLogin = await post('/api/auth/sms/login', {
-    phone, code: smsCode, device_name: 'SMS-Phone', os: 'android', device_id: 'sms-dev-' + suffix,
-  });
-  ok('验证码正确 → 自动建号并返回 token', smsLogin.status === 200 && !!smsLogin.json.token &&
-    smsLogin.json.username === phone, smsLogin.text);
+    const resend = await post('/api/auth/sms/send', { phone });
+    ok('60 秒内重发 → 429 + Retry-After', resend.status === 429, resend.text);
 
-  const replay = await post('/api/auth/sms/login', { phone, code: smsCode, device_name: 'SMS-Phone', os: 'android' });
-  ok('验证码一次性，重放 → 400', replay.status === 400, replay.text);
+    const wrong = await post('/api/auth/sms/login', {
+      phone, code: smsCode === '000000' ? '111111' : '000000', device_name: 'SMS-Phone', os: 'android',
+    });
+    ok('验证码错误 → 401 且提示剩余次数', wrong.status === 401 && /还可尝试/.test(wrong.text || ''), wrong.text);
 
-  // 同一手机号再次登录应复用同一个 user_id（幂等建号）
-  const sent2 = await post('/api/auth/sms/send', { phone });
-  const smsLogin2 = await post('/api/auth/sms/login', {
-    phone, code: sent2.json.dev_code, device_name: 'SMS-Phone-2', os: 'android',
-  });
-  ok('同手机号二次登录复用账号', smsLogin2.status === 200 && smsLogin2.json.user_id === smsLogin.json.user_id,
-    JSON.stringify({ first: smsLogin.json.user_id, second: smsLogin2.json.user_id }));
+    const smsLogin = await post('/api/auth/sms/login', {
+      phone, code: smsCode, device_name: 'SMS-Phone', os: 'android', device_id: 'sms-dev-' + suffix,
+    });
+    ok('验证码正确 → 自动建号并返回 token', smsLogin.status === 200 && !!smsLogin.json.token &&
+      smsLogin.json.username === phone, smsLogin.text);
 
-  const smsToken = smsLogin.json.token;
-  const smsDevices = await get('/api/devices', smsToken);
-  ok('短信登录的账号可正常拉设备列表', smsDevices.status === 200, JSON.stringify(smsDevices.json));
+    const replay = await post('/api/auth/sms/login', { phone, code: smsCode, device_name: 'SMS-Phone', os: 'android' });
+    ok('验证码一次性，重放 → 400', replay.status === 400, replay.text);
 
-  // 微信：用 dev 接口模拟"扫码完成"，不需要真实微信
-  const wurl = await post('/api/auth/wechat/url', { device_name: 'WX-PC', os: 'windows', device_id: 'wx-dev-' + suffix });
-  ok('生成微信授权地址', wurl.status === 200 && !!wurl.json.state &&
-    String(wurl.json.url).includes('snsapi_login'), wurl.text);
+    // 同一手机号再次登录应复用同一个 user_id（幂等建号）
+    const sent2 = await post('/api/auth/sms/send', { phone });
+    const smsLogin2 = await post('/api/auth/sms/login', {
+      phone, code: sent2.json.dev_code, device_name: 'SMS-Phone-2', os: 'android',
+    });
+    ok('同手机号二次登录复用账号', smsLogin2.status === 200 && smsLogin2.json.user_id === smsLogin.json.user_id,
+      JSON.stringify({ first: smsLogin.json.user_id, second: smsLogin2.json.user_id }));
 
-  const wxState = wurl.json.state;
-  const wxPending = await post('/api/auth/wechat/poll', { state: wxState });
-  ok('扫码前轮询 → pending', wxPending.status === 200 && wxPending.json.status === 'pending', wxPending.text);
+    const smsToken = smsLogin.json.token;
+    const smsDevices = await get('/api/devices', smsToken);
+    ok('短信登录的账号可正常拉设备列表', smsDevices.status === 200, JSON.stringify(smsDevices.json));
+  } else {
+    const why = (m.sms && m.sms.enabled) ? '短信开了但不在 dev 模式（缺 RD_SMS_DEV=1）'
+      : '短信未开启（需 RD_SMS_PROVIDER=mock + RD_SMS_DEV=1）';
+    skip('手机验证码登录（9 项）', why);
+  }
 
-  const simulate = await post('/api/auth/wechat/dev', { state: wxState, openid: 'openid-' + suffix, unionid: 'union-' + suffix });
-  ok('dev 模拟扫码成功', simulate.status === 200 && simulate.json.status === 'ok', simulate.text);
+  if (wxReady) {
+    // 微信：用 dev 接口模拟"扫码完成"，不需要真实微信
+    const wurl = await post('/api/auth/wechat/url', { device_name: 'WX-PC', os: 'windows', device_id: 'wx-dev-' + suffix });
+    ok('生成微信授权地址', wurl.status === 200 && !!wurl.json.state &&
+      String(wurl.json.url).includes('snsapi_login'), wurl.text);
 
-  const wxPoll = await post('/api/auth/wechat/poll', { state: wxState });
-  ok('扫码后轮询 → 拿到 token', wxPoll.status === 200 && !!wxPoll.json.token &&
-    String(wxPoll.json.username || '').startsWith('wx_'), wxPoll.text);
+    const wxState = wurl.json.state;
+    const wxPending = await post('/api/auth/wechat/poll', { state: wxState });
+    ok('扫码前轮询 → pending', wxPending.status === 200 && wxPending.json.status === 'pending', wxPending.text);
 
-  const wxPoll2 = await post('/api/auth/wechat/poll', { state: wxState });
-  ok('state 一次性，重复轮询 → consumed', wxPoll2.json && wxPoll2.json.status === 'consumed', wxPoll2.text);
+    const simulate = await post('/api/auth/wechat/dev', { state: wxState, openid: 'openid-' + suffix, unionid: 'union-' + suffix });
+    ok('dev 模拟扫码成功', simulate.status === 200 && simulate.json.status === 'ok', simulate.text);
 
-  const wxAgain = await post('/api/auth/wechat/url', { device_name: 'WX-PC', os: 'windows' });
-  await post('/api/auth/wechat/dev', { state: wxAgain.json.state, openid: 'openid-' + suffix, unionid: 'union-' + suffix });
-  const wxPoll3 = await post('/api/auth/wechat/poll', { state: wxAgain.json.state });
-  ok('同一微信二次登录复用账号', wxPoll3.status === 200 && wxPoll3.json.user_id === wxPoll.json.user_id,
-    JSON.stringify({ first: wxPoll.json.user_id, third: wxPoll3.json.user_id }));
+    const wxPoll = await post('/api/auth/wechat/poll', { state: wxState });
+    ok('扫码后轮询 → 拿到 token', wxPoll.status === 200 && !!wxPoll.json.token &&
+      String(wxPoll.json.username || '').startsWith('wx_'), wxPoll.text);
 
-  const wxBadState = await post('/api/auth/wechat/poll', { state: 'not-exist-' + suffix });
-  ok('未知 state → 404', wxBadState.status === 404, wxBadState.text);
+    const wxPoll2 = await post('/api/auth/wechat/poll', { state: wxState });
+    ok('state 一次性，重复轮询 → consumed', wxPoll2.json && wxPoll2.json.status === 'consumed', wxPoll2.text);
+
+    const wxAgain = await post('/api/auth/wechat/url', { device_name: 'WX-PC', os: 'windows' });
+    await post('/api/auth/wechat/dev', { state: wxAgain.json.state, openid: 'openid-' + suffix, unionid: 'union-' + suffix });
+    const wxPoll3 = await post('/api/auth/wechat/poll', { state: wxAgain.json.state });
+    ok('同一微信二次登录复用账号', wxPoll3.status === 200 && wxPoll3.json.user_id === wxPoll.json.user_id,
+      JSON.stringify({ first: wxPoll.json.user_id, third: wxPoll3.json.user_id }));
+
+    const wxBadState = await post('/api/auth/wechat/poll', { state: 'not-exist-' + suffix });
+    ok('未知 state → 404', wxBadState.status === 404, wxBadState.text);
+  } else {
+    const why = (m.wechat && m.wechat.enabled) ? '微信已配但没开模拟扫码（缺 RD_AUTH_DEV=1）'
+      : '微信未配置（需 RD_WECHAT_APP_ID + RD_WECHAT_APP_SECRET + RD_AUTH_DEV=1）';
+    skip('微信扫码登录（7 项）', why);
+  }
 
   cA.close();
   cB.close();
 
   console.log('');
+  if (skipped > 0) {
+    console.log(`跳过 ${skipped} 组未开启的功能（不影响结论，按提示配置后可覆盖）`);
+  }
   if (failures === 0) {
     console.log('全部用例通过 ✅');
     process.exit(0);

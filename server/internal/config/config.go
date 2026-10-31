@@ -1,10 +1,13 @@
-// Package config 负责加载服务器配置。优先级：命令行 flag > 环境变量 > 默认值。
+// Package config 负责加载服务器配置。
+// 优先级：命令行 flag > 环境变量 > .env > 默认值。
 package config
 
 import (
 	"flag"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // Config 汇总服务器运行所需的全部配置项。
@@ -58,6 +61,9 @@ type Config struct {
 func Load() *Config {
 	cfg := &Config{}
 
+	// 先读 .env：命令行 flag > 环境变量 > .env > 默认值
+	loadDotEnv()
+
 	flag.StringVar(&cfg.ListenAddr, "listen", envStr("RD_LISTEN", ":8443"), "HTTP/WebSocket 监听地址")
 	flag.StringVar(&cfg.PublicAddr, "public", envStr("RD_PUBLIC", "http://127.0.0.1:8443"), "对外公网地址（如 https://rd.example.com）")
 	flag.StringVar(&cfg.TurnAddr, "turn-listen", envStr("RD_TURN_LISTEN", ":3478"), "TURN 监听地址")
@@ -94,6 +100,59 @@ func (c *Config) WechatEnabled() bool {
 // SMSEnabled 短信验证码登录是否可用。
 func (c *Config) SMSEnabled() bool {
 	return c.SMSProvider != "" && c.SMSProvider != "off"
+}
+
+// loadDotEnv 依次尝试当前目录与可执行文件同目录下的 .env，
+// 找到第一个就加载。已存在的环境变量不会被覆盖，保证"命令行/系统环境变量优先"。
+func loadDotEnv() {
+	for _, p := range dotEnvCandidates() {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		applyDotEnv(string(data))
+		return
+	}
+}
+
+// dotEnvCandidates 返回 .env 的候选路径（当前目录优先，其次 exe 所在目录）。
+func dotEnvCandidates() []string {
+	paths := []string{".env"}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		paths = append(paths, filepath.Join(dir, ".env"))
+	}
+	return paths
+}
+
+// applyDotEnv 解析 KEY=VALUE 文本并写入环境变量（不覆盖已存在的）。
+// 兼容：UTF-8 BOM、CRLF、`#` 注释、空行、`export KEY=VALUE`、值两侧的引号。
+func applyDotEnv(text string) {
+	text = strings.TrimPrefix(text, "\ufeff")
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		// 去掉成对引号；未加引号时保留 # 之后的内容（值里可能真有 #）
+		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+			val = val[1 : len(val)-1]
+		}
+		if _, exists := os.LookupEnv(key); exists {
+			continue
+		}
+		_ = os.Setenv(key, val)
+	}
 }
 
 func envStr(key, def string) string {

@@ -129,24 +129,36 @@
 
 **前置**：Windows + [Go](https://go.dev/dl/)（装完开个新终端，`go version` 有输出即可）。
 
+**最省事：双击仓库根目录的 `start.cmd`**。它会生成配置 → 编译 → 后台启动 → 健康检查 →
+把「客户端该填的地址」打出来，窗口最后会停住，等你按任意键。
+
+| 双击这个 | 干什么 |
+| --- | --- |
+| `start.cmd` | 启动本机服务器（等于 `quickstart.ps1`） |
+| `stop.cmd` | 停止上一次启动的服务器 |
+| `build.cmd` | 环境体检 + 构建客户端（缺哪个工具就跳过哪个端并说明） |
+| `package.cmd` | 把产物整理进 `dist/`（按版本命名 + 写校验和） |
+
+> **为什么给的是 `.cmd` 而不是让你双击 `.ps1`**：Windows 上 `.ps1` 双击默认用记事本打开，
+> 不会执行；而且直接跑 `.ps1` 可能被执行策略拦住（报「未对文件进行数字签名」）。
+> 这些 `.cmd` 内部用的是 powershell.exe 的**绝对路径** + `-ExecutionPolicy Bypass`，
+> 所以 PATH 里没有 `powershell`、或策略是 Restricted / AllSigned 也能正常跑。
+
+命令行用法（参数会原样传给脚本，例如换端口 `start.cmd -Port 9443`、停止 `start.cmd -Stop`）：
+
 ```powershell
-# 仓库根目录
-powershell -ExecutionPolicy Bypass -File scripts\quickstart.ps1
+.\start.cmd                  # 启动
+.\start.cmd -Port 9443       # 换端口
+.\start.cmd -Stop            # 停止
+.\build.cmd                  # 体检 + 构建
 ```
 
-一条命令完成：生成 `server\.env`（随机 JWT、自动探测内网 IP）→ 编译 → 后台启动 →
-`/healthz` 健康检查 → **打印客户端该填的服务器地址**。
+启动成功后输出类似：
 
 ```
 客户端「服务器地址」填：
    本机使用      http://127.0.0.1:8443
    同一 WiFi 的设备  http://192.168.1.23:8443
-```
-
-```powershell
-scripts\quickstart.ps1 -Port 9443    # 换端口
-scripts\quickstart.ps1 -Force        # 重建 .env + 强制重编译
-scripts\quickstart.ps1 -Stop         # 停止
 ```
 
 > 手机要和电脑在**同一 WiFi**；连不上先看 Windows 防火墙是否放行 8443（TCP）与 3478（TCP+UDP）。
@@ -168,21 +180,28 @@ ssh root@你的IP && cd /tmp/remotedesk-server && chmod +x deploy/install.sh
 ### 2.3 构建客户端
 
 ```powershell
+.\build.cmd                     # 双击也行：先体检，缺什么直接说，然后能编的端都编
+.\build.cmd -Target windows     # 只编 Windows
+```
+
+不想双击就看等价的命令行写法：
+
+```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup.ps1                # 先体检，缺什么直接说
 powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -Target all    # 再按需构建
 ```
 
 | 端 | 产物 |
 | --- | --- |
-| Windows | `windows\src-tauri\target\release\remotedesk.exe` |
+| Windows | `windows\src-tauri\target\release\remotedesk.exe`（安装包在 `bundle\nsis`、`bundle\msi`） |
 | Android | `android\app\build\outputs\apk\debug\app-debug.apk` |
 | HarmonyOS | `dist\harmony\*.hap`（需 DevEco Studio） |
 
 细节见 [7. 客户端构建](#7-客户端构建)。
 
 > 只是想先看看界面？`dist/` 里已经有**三端统一到 1.3.0** 的现成产物
-> （Windows EXE / Android APK / 4 平台服务端），按 `dist/README.md` 直接跑即可，
-> 不用自己装工具链。
+> （Windows 安装包 setup.exe / MSI、Android APK、4 平台服务端），
+> 按 `dist/README.md` 直接跑即可，不用自己装工具链。
 
 ### 2.4 第一次连接
 
@@ -213,7 +232,12 @@ remotedesk/
 ├─ harmony/                HarmonyOS 客户端（ArkTS + ArkWeb 内 WebRTC 桥接）
 │  └─ entry/src/main/ets/{pages/Index.ets, common/*.ets}
 │     entry/src/main/resources/rawfile/rdwebrtc.html
+├─ start.cmd              双击启动本机服务器（内部调 quickstart.ps1）
+├─ stop.cmd               停止服务器
+├─ build.cmd              双击体检 + 构建
+├─ package.cmd            双击整理 dist
 ├─ scripts/                构建、体检与测试
+│  ├─ _common.ps1          环境自愈（PATHEXT / 工具链缓存目录），其它脚本共用
 │  ├─ quickstart.ps1       本机一键起服务器
 │  ├─ setup.ps1            环境体检 + 一键构建
 │  ├─ package-dist.ps1     整理 dist 发布包（命名 + VERSION + 校验和）
@@ -708,6 +732,11 @@ cd /tmp/remotedesk-server && chmod +x deploy/install.sh
 
 > `--ip-only` / `--local` 走明文 HTTP：客户端是原生程序，不依赖浏览器安全上下文；
 > 媒体仍是 DTLS-SRTP 端到端加密，只是信令没走 TLS。正式对外仍建议上域名。
+
+**配置怎么生效**：`remotedesk` 启动时会**自己读 `.env`**（先找当前工作目录，再找 exe 所在目录），
+所以手工部署只要把 `.env.example` 复制成 `.env` 放在二进制旁边就行，不必自己 `export`；
+systemd 那份服务文件同时用了 `EnvironmentFile=/opt/remotedesk/.env`，两条路都通。
+优先级：**命令行 flag > 环境变量 > `.env` > 内置默认值**，已存在的环境变量不会被 `.env` 覆盖。
 
 ### 8.2 Docker
 
@@ -1468,15 +1497,53 @@ removeTrack + 重协商。
 **能不能不用域名？**
 可以，`install.sh --ip-only <IP>` 走 `http://IP:8080`；本地用 `--local`。
 
+**双击 `.ps1` 没反应，或者用记事本打开了？**
+Windows 默认把 `.ps1` 关联到编辑器，双击只会打开文件、不会执行。**别双击 `.ps1`**，
+双击仓库根目录的 `start.cmd` / `build.cmd` / `package.cmd` / `stop.cmd` 即可
+（它们用 powershell.exe 的绝对路径 + `-ExecutionPolicy Bypass`，不受 PATH 与策略影响）。
+
 **跑 `.ps1` 报"未对文件进行数字签名 / 无法加载脚本"？**
+是执行策略拦的，三种解法（从省事到彻底）：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\smoke.ps1   # 单次绕过
-Unblock-File .\scripts\*.ps1                                   # 解除下载锁定
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass     # 仅当前窗口
+.\start.cmd                                                     # ① 用 .cmd 启动器，内部已带 Bypass
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke.ps1    # ② 单次绕过
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass      # ③ 仅当前窗口放开
 ```
 
-脚本带 UTF-8 BOM，Windows PowerShell 5.1 与 PowerShell 7 都能正确读中文提示。
+**报"无法将 powershell 项识别为 cmdlet"？**
+说明 `powershell.exe` 不在 PATH 里（精简系统、或 PATH 被改过）。用 `.cmd` 启动器即可，
+它直接调 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`。
+
+**脚本说"编译失败（退出码 ）"——退出码是空的？**
+这是 `%PATHEXT%` 里缺了 `.EXE`。PowerShell 靠 PATHEXT 判断一个文件是**可执行程序**还是
+**文档**；缺了 `.EXE` 时它会把 `.exe` 当文档处理，于是：
+
+- 外部命令的输出全部捕获不到（拿到的永远是空）
+- `$LASTEXITCODE` 永远是空，靠它判断成败的脚本就会这样误报
+- 只要写成 `& foo.exe | Select-Object` 就抛
+  `CantActivateDocumentInPipeline / 无法在管道中间运行文档`
+
+脚本会在开头自动补回 `.EXE`（见 `scripts/_common.ps1` 的 `Repair-PathExt`），
+自己排查时可以确认一下：
+
+```powershell
+$env:PATHEXT        # 正常应含 .COM;.EXE;.BAT;.CMD;...
+```
+
+**`go: could not create module cache: mkdir C:\Users\xxx\go: Access is denied`？**
+Go 默认把模块缓存放 `~/go`、构建缓存放 `%LOCALAPPDATA%`，受限账户下不可写。
+脚本已改指到仓库内的 `.tools\gopath` / `.tools\gocache`（`Set-GoEnv`），
+Rust 同理改到 `.tools\rustup` / `.tools\cargo`（`Set-RustEnv`）。
+
+**`cargo` 体检显示 `[!!]`：`no default is configured`？**
+工具链还没装，执行 `rustup default stable-x86_64-pc-windows-msvc` 即可。
+`[!!]` 表示"在 PATH 里但自检没通过"，比直接报"未找到"更值得看——
+体检若只看文件在不在，会给出一片假绿。
+
+**脚本带 UTF-8 BOM 会不会读不出中文？**
+不会。`.ps1` 统一是「UTF-8 + BOM + CRLF」，Windows PowerShell 5.1 与 PowerShell 7 都能正确解析；
+`.cmd` 是 GBK + CRLF，保证默认代码页下中文提示不乱码。
 
 **数据存在哪？**
 服务器只有 `users / devices / sessions / links` 四张表（v1.03 增加了 `sms_codes` 与 `auth_states`），
@@ -1584,6 +1651,57 @@ MSVC 头文件/库找不到时，用
 - `GET /api/auth/methods` 告诉客户端哪些方式可用（含 dev 标记），未配置的入口自动隐藏
 - 三端登录页统一改成三个标签：账号密码 / 手机验证码 / 微信登录
 
+**易用性修复（本轮）**
+
+- 根目录新增 4 个双击即可运行的启动器：`start.cmd`（起服务器）、`stop.cmd`（停）、
+  `build.cmd`（体检 + 构建）、`package.cmd`（打包 dist）。内部用 powershell.exe 绝对路径 +
+  `-ExecutionPolicy Bypass`，避开「双击 .ps1 只打开记事本」「执行策略拦截」
+  「PATH 里没有 powershell」这三类常见卡点
+- **服务端现在会读 `.env`**：先找当前目录，再找 exe 同目录；命令行 flag > 环境变量 > `.env` > 默认值，
+  已存在的环境变量不会被覆盖。之前发布说明让你「复制 .env.example 再启动」其实是空转
+- `.env` 解析兼容 UTF-8 BOM / CRLF / `#` 注释 / `export KEY=VALUE` / 值两侧引号，
+  新增 `internal/config` 单测 3 项覆盖这些边界
+- `quickstart.ps1` 写 `.env` 改为 **UTF-8 无 BOM**（PS 5.1 的 `-Encoding utf8` 会带 BOM）
+- `setup.ps1` 修掉两个会直接崩掉的问题：`$env:ProgramFiles` 为空时 `Join-Path` 抛异常、
+  精简环境里 `USERPROFILE/LOCALAPPDATA` 为空；JDK 识别限定为 `<jdk>\bin\java.exe`，
+  避免被 Oracle 的 javapath 转发器带偏
+- `docker-compose.yml` 补齐短信 / 微信相关环境变量透传（之前 Docker 部署只能用账号密码）
+- 全部 `.ps1` 统一为 UTF-8 + BOM + CRLF，`.cmd` 统一为 GBK + CRLF
+
+**脚本可运行性专项（本轮重点：让脚本在"不干净"的 Windows 上也能跑）**
+
+新增 `scripts/_common.ps1`，各脚本在开头 dot-source 引入，做三件环境自愈：
+
+- `Repair-PathExt`：**`%PATHEXT%` 缺 `.EXE` 时脚本会"假成功"**——PowerShell 把 `.exe` 当文档
+  而非可执行程序，结果输出捕获不到、`$LASTEXITCODE` 永远为空、一接管道就抛
+  `CantActivateDocumentInPipeline`。补丁会自动补全 PATHEXT
+- `Set-GoEnv` / `Set-RustEnv` / `Repair-TempDir`：把 Go、Rust 的缓存目录与 `TMP/TEMP`
+  从"可能不可写的用户目录"改指到仓库内的 `.tools\`，解决
+  `could not create module cache: Access is denied` 与 `LNK1104 ...\Temp\lnk{...}.tmp`
+- 顺带关掉 `Invoke-WebRequest` 的进度条（否则健康检查那几行会被
+  「正在读取 Web 响应…(读取的字节数: 0)」冲掉）
+
+具体到每个脚本：
+
+- `quickstart.ps1`
+  - 生成的 `.env` **补上登录配置段**：短信默认 `mock` + `RD_SMS_DEV=1`（本机即时可用），
+    微信留注释模板（局域网 IP 满足不了回调域要求）。
+    之前生成的 `.env` 只有基础项，一键起来的服务只能用账号密码登录
+  - **构建注入版本号** `-X main.version`（读自 `windows/package.json`），
+    之前一键构建出的二进制 `/version` 返回 `dev`，和发布包对不上
+  - 环境变量冲突时 `Start-Process` 会抛「已添加项。字典中的关键字: HTTP_PROXY」，
+    改用 WMI `Win32_Process.Create` 兜底（子进程脱离控制台，关窗口也带不走服务）
+  - `-Port` 会同步写回 `.env`，否则 `.env` 里的端口盖掉命令行参数，健康检查必然超时
+- `smoke.ps1`：补齐 e2e 需要的 `RD_SMS_*` / `RD_WECHAT_*` / `RD_AUTH_DEV`（之前第 12 组必挂）；
+  工作目录固定到 `dist\smoke`，避免读到 `server\.env` 里 quickstart 那套配置；
+  兜底用 .NET 而非 WMI（WMI 不继承环境变量，会把设好的 `RD_*` 全丢掉）
+- `setup.ps1`：体检结果区分三态——`[OK]` 可用 / `[--]` 没装 / **`[!!]` 装了但自检没通过**。
+  之前 `cargo` 家目录不可写时拿到的"版本号"其实是一段报错，体检却显示 `[OK]`，是片假绿
+- `package-dist.ps1`：算校验和时排除 `dist\quickstart`、`dist\smoke` 与 `*.~` 备份文件，
+  否则运行时的库和日志会被当成发布内容写进 `SHA256SUMS.txt`
+- `e2e-test.mjs`：短信 / 微信没配置时**标记跳过**而不是判失败，并提示补齐哪个环境变量。
+  之前对着只开了密码登录的服务器跑，会直接甩 6 个红叉
+
 **客户端（本次一并重编）**
 
 - Windows：`npx tauri build --no-bundle` 通过，EXE 为 1.3.0；新增 Rust 命令 `open_url`（仅 http/https）
@@ -1612,7 +1730,13 @@ MSVC 头文件/库找不到时，用
 | Windows 启动 | 直接运行 `remotedesk.exe` | 进程正常常驻（43 MB），无崩溃 |
 | Android 客户端 | `gradle assembleDebug` | `BUILD SUCCESSFUL`，`versionName=1.3.0`，`app-debug.apk` 47.3 MB |
 | 发布包实测 | 直接启动 `dist/server/remotedesk-server-*.exe` 跑 e2e | `/version` → `1.3.0`，**全部用例通过** |
-| 发布包校验 | `cd dist && sha256sum -c SHA256SUMS.txt` | 9 个文件全部 OK |
+| 发布包校验 | `cd dist && sha256sum -c SHA256SUMS.txt` | 10 个文件全部 OK |
+| 配置单测 | `go test ./internal/config/ -v` | 3 项全过（BOM / CRLF / 注释 / 引号 / 不覆盖已有变量） |
+| `.env` 生效 | 在含 `.env` 的目录启动二进制 | 按 `.env` 监听 `:18555`、库落 `./t.db`、`sms=off`；默认 8443 无响应 |
+| 一键启动器 | 双击 / `cmd //c start.cmd` | 编译 → 后台起 → `/healthz` → `/version` = `1.3.0`，打印客户端地址 |
+| 一键停止 | `stop.cmd` | 按 pid 文件精确停掉实例，不误伤 |
+| 冒烟测试 | `scripts\smoke.ps1 -Port 19000` | **全部用例通过**（11 组 + 登录 2 组 + 媒体 1 组） |
+| 环境体检 | `scripts\setup.ps1 -Target check` | 7 项工具识别正确，异常项标 `[!!]` 并给出修法 |
 | 静态检查 | XML / JSON / 括号配平 | 通过 |
 
 **未验证**：HarmonyOS 端未编译——需要 DevEco Studio 的 hvigor 工具链，本机没有；
@@ -1672,7 +1796,7 @@ MSVC 头文件/库找不到时，用
 | 部署脚本 | `bash -n install.sh` | 通过 |
 | PowerShell 脚本 | `Parser::ParseFile` | 通过 |
 
-**未能在本机验证**：本机没有 Go / Rust / JDK，`go vet`、`go test`、`e2e-test.mjs`、三端编译未重跑。
+**未能在本机验证**：当时本机没有 Go / Rust / JDK，`go vet`、`go test`、`e2e-test.mjs`、三端编译未重跑。
 合入前请在具备工具链的环境执行：
 
 ```powershell

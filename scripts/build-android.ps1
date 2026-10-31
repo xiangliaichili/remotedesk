@@ -16,6 +16,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
+
+# 环境自愈（PATHEXT / 工具链缓存目录）与 Step、Info、Good、Warn、Bad 都在 _common 里
+$common = Join-Path $PSScriptRoot "_common.ps1"
+if (Test-Path $common) { . $common }
 $dir = Join-Path $root "android"
 
 function Fail($msg) {
@@ -24,10 +28,6 @@ function Fail($msg) {
     exit 1
 }
 
-function Step($msg) {
-    Write-Host ""
-    Write-Host "==> $msg" -ForegroundColor Cyan
-}
 
 Step "定位 JDK"
 if (-not $env:JAVA_HOME -or -not (Test-Path (Join-Path $env:JAVA_HOME "bin\java.exe"))) {

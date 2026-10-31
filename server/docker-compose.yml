@@ -13,6 +13,18 @@ services:
       RD_TURN_RELAY_IP: "${RD_TURN_RELAY_IP:-}"
       RD_DB: "/data/remotedesk.db"
       RD_JWT_SECRET: "${RD_JWT_SECRET:-change-me-in-production}"
+      # ---- 登录方式（不填就只用账号密码）----
+      RD_SMS_PROVIDER: "${RD_SMS_PROVIDER:-off}"
+      RD_SMS_SIGN: "${RD_SMS_SIGN:-}"
+      RD_SMS_TEMPLATE: "${RD_SMS_TEMPLATE:-}"
+      RD_ALIYUN_KEY_ID: "${RD_ALIYUN_KEY_ID:-}"
+      RD_ALIYUN_KEY_SECRET: "${RD_ALIYUN_KEY_SECRET:-}"
+      RD_WECHAT_APP_ID: "${RD_WECHAT_APP_ID:-}"
+      RD_WECHAT_APP_SECRET: "${RD_WECHAT_APP_SECRET:-}"
+      RD_WECHAT_REDIRECT: "${RD_WECHAT_REDIRECT:-}"
+      # 上线必须为 0
+      RD_SMS_DEV: "${RD_SMS_DEV:-0}"
+      RD_AUTH_DEV: "${RD_AUTH_DEV:-0}"
     volumes:
       - ./data:/data
       - ./data/caddy:/root/.local/share/caddy:ro

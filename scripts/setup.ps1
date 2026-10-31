@@ -19,23 +19,38 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
-function Step($msg) {
-    Write-Host ""
-    Write-Host "==> $msg" -ForegroundColor Cyan
-}
-function Row($name, $ok, $detail) {
-    $mark = if ($ok) { "OK " } else { "-- " }
-    $color = if ($ok) { "Green" } else { "DarkGray" }
-    Write-Host ("  [{0}] {1,-10} {2}" -f $mark, $name, $detail) -ForegroundColor $color
-}
+# 环境自愈（PATHEXT / 工具链缓存目录）与 Step 都在 _common 里
+$common = Join-Path $PSScriptRoot "_common.ps1"
+if (Test-Path $common) { . $common }
 
-function Find-Tool($name, $extraPaths) {
-    $c = Get-Command $name -ErrorAction SilentlyContinue
-    if ($c) { return $c.Source }
-    foreach ($p in $extraPaths) {
-        if ($p -and (Test-Path $p)) { return $p }
+# 极简环境里这些变量可能为空，后面 Join-Path 会直接抛异常，先兜底
+if (-not $env:USERPROFILE) { $env:USERPROFILE = $HOME }
+if (-not $env:LOCALAPPDATA -and $env:USERPROFILE) { $env:LOCALAPPDATA = Join-Path $env:USERPROFILE "AppData\Local" }
+
+# 工具链的家目录也指到仓库内：用户目录不可写时，go / cargo 连 -version 都会失败
+Set-GoEnv $root
+Set-RustEnv $root
+Repair-TempDir $root
+
+function Row($name, $ok, $detail) {
+    # $detail 是个对象：Text=显示文本，Broken=工具在但跑不起来（比如家目录不可写）
+    $text = if ($detail -is [string]) { $detail } else { $detail.Text }
+    $broken = ($detail -isnot [string]) -and $detail.Broken
+    if ($broken) {
+        $mark = "!! "
+        $color = "Yellow"
+    } elseif ($ok) {
+        $mark = "OK "
+        $color = "Green"
+    } else {
+        $mark = "-- "
+        $color = "DarkGray"
     }
-    return $null
+    Write-Host ("  [{0}] {1,-10} {2}" -f $mark, $name, $text) -ForegroundColor $color
+    if ($broken) {
+        # 转成字符串存：外部命令输出可能是数组，后面 -f 格式化会打出一串 System.Object[]
+        $script:brokenTools += [pscustomobject]@{ Name = $name; Msg = "$text" }
+    }
 }
 
 # ---------- 体检 ----------
@@ -48,25 +63,27 @@ $tools.cargo = Find-Tool "cargo" @(
     (Join-Path $root ".tools\cargo\bin\cargo.exe"),
     (Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe")
 )
-$tools.go = Find-Tool "go" @(
-    (Join-Path $root ".tools\go\bin\go.exe"),
-    (Join-Path (Split-Path -Parent $root) ".tools\go\bin\go.exe")
-)
+$tools.go = Find-Go $root
 # JDK：优先找真正的 JDK 根目录（不要被 Oracle 的 javapath 转发器坑到）
 function Resolve-JavaHome {
+    # $env:ProgramFiles 在某些精简环境/32 位宿主下可能为空，先兜底
+    $progDirs = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, "C:\Program Files", "C:\Program Files (x86)") |
+        Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
     $patterns = @("Microsoft\jdk-*", "Eclipse Adoptium\jdk-*", "Zulu\zulu-*", "Java\jdk-17*", "Java\jdk-21*")
-    foreach ($pat in $patterns) {
-        $hit = Get-ChildItem (Join-Path $env:ProgramFiles $pat) -ErrorAction SilentlyContinue |
-            Sort-Object Name -Descending | Select-Object -First 1
-        if ($hit -and (Test-Path (Join-Path $hit.FullName "bin\java.exe"))) { return $hit.FullName }
+    foreach ($base in $progDirs) {
+        foreach ($pat in $patterns) {
+            $hit = Get-ChildItem (Join-Path $base $pat) -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending | Select-Object -First 1
+            if ($hit -and (Test-Path (Join-Path $hit.FullName "bin\java.exe"))) { return $hit.FullName }
+        }
     }
     if ($env:JAVA_HOME -and (Test-Path (Join-Path $env:JAVA_HOME "bin\java.exe"))) { return $env:JAVA_HOME }
     $c = Get-Command java -ErrorAction SilentlyContinue
     if ($c) {
         # 只有形如 <jdk>\bin\java.exe 才算 JDK 根目录；javapath 这类转发器要排除
-        $home = Split-Path -Parent (Split-Path -Parent $c.Source)
+        $javaHome = Split-Path -Parent (Split-Path -Parent $c.Source)
         if ((Split-Path -Leaf (Split-Path -Parent $c.Source)) -eq "bin" -and
-            (Test-Path (Join-Path $home "bin\java.exe"))) { return $home }
+            (Test-Path (Join-Path $javaHome "bin\java.exe"))) { return $javaHome }
     }
     return $null
 }
@@ -100,13 +117,29 @@ function Ver($path, [string]$flag) {
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $out = & $path $flag 2>&1 | Select-Object -First 1
-        if (-not $out) { return "$path  (已安装)" }
-        return "$path  ($out)"
+        $out = & $path $flag 2>&1
+        if ($out) { $out = $out | Select-Object -First 1 }
+        if (-not $out) {
+            return [pscustomobject]@{ Text = "$path  (已安装)"; Broken = $false }
+        }
+        # 原生程序用 CRLF 时只按 \n 切行会留下尾部 \r，直接拼进 Write-Host 会冲掉整行
+        # （adb 就是这样），所以这里清掉换行符
+        $line = ("$out" -replace "[\r\n]+", " ").Trim()
+        # 版本号位置拿到的是报错内容，说明工具在但跑不起来（典型是家目录不可写）。
+        # 这种比"没装"更坑：体检看着是绿的，真构建才发现动不了。
+        $broken = ($line -match '(?i)(error|could not|拒绝访问|Access is denied|无法)')
+        return [pscustomobject]@{
+            Text   = "$path  ($line)"
+            Broken = $broken
+        }
     }
-    catch { return $path }
+    catch {
+        return [pscustomobject]@{ Text = "$path  (读取版本失败)"; Broken = $true }
+    }
     finally { $ErrorActionPreference = $prevEap }
 }
+
+$script:brokenTools = @()
 
 Row "node" ([bool]$tools.node) (Ver $tools.node "--version")
 Row "npm" ([bool]$tools.npm) (Ver $tools.npm "--version")
@@ -115,6 +148,24 @@ Row "go" ([bool]$tools.go) (Ver $tools.go "version")
 Row "java" ([bool]$tools.java) (Ver $tools.java "-version")
 Row "gradle" ([bool]$tools.gradle) (Ver $tools.gradle "--version")
 Row "adb" ([bool]$tools.adb) (Ver $tools.adb "version")
+
+if ($script:brokenTools.Count -gt 0) {
+    Write-Host ""
+    Write-Host ("  [!!] 这些工具找到了、但自检没通过：" + (($script:brokenTools | ForEach-Object { $_.Name }) -join "、")) -ForegroundColor Yellow
+    Write-Host "       工具在 PATH 里不等于能用，下面按具体原因给修法：" -ForegroundColor Yellow
+    foreach ($b in $script:brokenTools) {
+        # 用 if/elseif 而不是 switch -Regex：后者每条匹配的分支都会输出，
+        # 一条报错同时命中两条规则时会拼成数组，打出 System.Object[]
+        if ($b.Msg -match 'no default is configured|could not choose a version') {
+            $tip = "还没装 Rust 工具链，执行：rustup default stable-x86_64-pc-windows-msvc"
+        } elseif ($b.Msg -match 'could not create home directory|拒绝访问|Access is denied') {
+            $tip = "家目录不可写，本脚本已改指到仓库内的 .tools\；仍失败就换个有 %USERPROFILE% 写权限的账户"
+        } else {
+            $tip = "把上面括号里的报错直接搜一下，通常是权限或缺依赖"
+        }
+        Write-Host ("       · {0}：{1}" -f $b.Name, $tip) -ForegroundColor Yellow
+    }
+}
 
 Write-Host ""
 Write-Host "  装什么看这里：" -ForegroundColor Gray

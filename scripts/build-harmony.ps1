@@ -22,6 +22,10 @@ param(
     [string]$NodeHome  = ""
 )
 
+# 环境自愈（PATHEXT / 工具链缓存目录）与 Step、Info、Good、Warn、Bad 都在 _common 里
+$common = Join-Path $PSScriptRoot "_common.ps1"
+if (Test-Path $common) { . $common }
+
 $ErrorActionPreference = "Stop"
 
 $Root    = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)

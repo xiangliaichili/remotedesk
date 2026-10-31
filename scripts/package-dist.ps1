@@ -20,28 +20,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
+
+# 环境自愈（PATHEXT / 工具链缓存目录）与 Step、Info、Good、Warn、Bad 都在 _common 里
+$common = Join-Path $PSScriptRoot "_common.ps1"
+if (Test-Path $common) { . $common }
 $dist = Join-Path $root "dist"
 
-function Step($msg) {
-    Write-Host ""
-    Write-Host "==> $msg" -ForegroundColor Cyan
-}
-function Info($msg) { Write-Host "    $msg" -ForegroundColor DarkGray }
-function Good($msg) { Write-Host "    $msg" -ForegroundColor Green }
-function Warn($msg) { Write-Host "  [!] $msg" -ForegroundColor Yellow }
-function Bad($msg) { Write-Host "  [X] $msg" -ForegroundColor Red }
-
-# ---------- 版本 ----------
-function Get-PkgVersion($path) {
-    if (-not (Test-Path $path)) { return "" }
-    # 不能用 ConvertFrom-Json：PS 5.1 下 -Raw 会按 ANSI 读，中文包名会变成乱码导致解析失败
-    $txt = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
-    if ($txt -match '"version"\s*:\s*"([^"]+)"') { return $Matches[1] }
-    return ""
-}
-
 if (-not $Version) {
-    $Version = Get-PkgVersion (Join-Path $root "windows\package.json")
+    $Version = Read-JsonVersion (Join-Path $root "windows\package.json")
     if (-not $Version) { $Version = "0.0.0" }
 }
 Info "打包版本：$Version"
@@ -146,7 +132,7 @@ if (Test-Path $envExample) {
 # ---------- VERSION ----------
 Step "写 VERSION"
 $buildDate = (Get-Date).ToString("yyyy-MM-dd HH:mm")
-$srcVersion = Get-PkgVersion (Join-Path $root "windows\package.json")
+$srcVersion = Read-JsonVersion (Join-Path $root "windows\package.json")
 $verText = @(
     "# 发布包版本信息（由 scripts/package-dist.ps1 生成）",
     "",
@@ -166,9 +152,23 @@ Good "dist/VERSION"
 
 # ---------- 校验和 ----------
 Step "重算 SHA256SUMS.txt"
+# 运行时目录（dist\quickstart 里放着 quickstart 起的库与 pid、dist\smoke 放着冒烟
+# 临时库与日志）不是发布内容，别算进清单，否则别人拿到 dist 会看到一堆临时文件。
+# 另外清掉 `xxx~` 这类编辑器/工具留下的备份文件。
 $files = Get-ChildItem $dist -Recurse -File |
-    Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
+    Where-Object {
+        $_.Name -ne "SHA256SUMS.txt" -and
+        $_.Name -notlike "*~" -and
+        $_.FullName -notlike "*\quickstart\*" -and
+        $_.FullName -notlike "*\smoke\*"
+    } |
     Sort-Object FullName
+
+$stale = Get-ChildItem $dist -Recurse -File -Filter "*~" -ErrorAction SilentlyContinue
+foreach ($f in $stale) {
+    Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+    Info ("清掉残留备份 " + $f.Name)
+}
 
 $lines = New-Object System.Collections.Generic.List[string]
 foreach ($f in $files) {
@@ -186,6 +186,12 @@ Write-Host "==============================================================" -For
 Write-Host " dist/ 已整理（版本 $Version）" -ForegroundColor Green
 Write-Host "==============================================================" -ForegroundColor Green
 Get-ChildItem $dist -Recurse -File |
+    Where-Object {
+        $_.Name -ne "SHA256SUMS.txt" -and
+        $_.Name -notlike "*~" -and
+        $_.FullName -notlike "*\quickstart\*" -and
+        $_.FullName -notlike "*\smoke\*"
+    } |
     Sort-Object FullName |
     ForEach-Object {
         $rel = $_.FullName.Substring($dist.Length + 1)
