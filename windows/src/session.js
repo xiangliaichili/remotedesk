@@ -1,6 +1,17 @@
-// WebRTC 会话：协商、屏幕轨道、控制通道、文件传输
+// WebRTC 会话：协商、屏幕轨道、语音/摄像头、控制通道、文件传输
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  emptyMediaState,
+  guessTrackKind,
+  makeMediaState,
+  makeTrackAnnounce,
+  normalizeMediaPolicy,
+  parseMediaState,
+  permissionHint,
+  reasonText,
+  trackKindMap,
+} from "./media.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -47,6 +58,19 @@ export class PeerSession {
     this._recv = null;
     this._fileChain = Promise.resolve();
     this._sentOffer = false;
+
+    // ---- 语音 / 摄像头 ----
+    // policy：被控端允许的媒体能力（来自服务端会话响应 / control_start）
+    this.policy = normalizeMediaPolicy(o.policy);
+    this.media = emptyMediaState(this.policy);
+    this._micStream = null;
+    this._camStream = null;
+    this._micSender = null;
+    this._camSender = null;
+    this._mediaBusy = false;
+    this._trackKinds = {}; // trackId → "camera" | "mic"
+    this._offerChain = Promise.resolve();
+    this._renegotiating = false;
   }
 
   _emit(name, payload) {
@@ -93,11 +117,38 @@ export class PeerSession {
 
     this.pc.ondatachannel = (e) => this._attachChannel(e.channel);
 
+    // 被控端按需追加麦克风/摄像头轨道后需要重新协商（新增轨道无法凭空进入已建立的 SDP）。
+    // 只有被控端会主动重协商；控制端只应答，避免 glare。
+    this.pc.onnegotiationneeded = () => {
+      if (this.role !== "controlled" || this.closed) return;
+      if (!this.pc || !this.pc.currentRemoteDescription) return; // 首次协商由控制端发起
+      this._renegotiate();
+    };
+
+    // 轨道分流：音频 → 独立播放器；摄像头 → 画中画；其余按屏幕处理。
+    this.pc.ontrack = (e) => {
+      const track = e.track;
+      const streamId = (e.streams[0] && e.streams[0].id) || "";
+      // 优先用 SDP 里的 stream id（Android 用 rd-camera 命名），再退回 media_track 映射
+      const kind =
+        streamId === "rd-camera"
+          ? "camera"
+          : this._trackKinds[track.id] || guessTrackKind(track.id, track.kind);
+      if (track.kind === "audio" || kind === "mic") {
+        this._emit("remoteAudio", { track, stream: e.streams[0] || null });
+        return;
+      }
+      if (kind === "camera") {
+        this._emit("remoteCamera", { track, stream: e.streams[0] || null });
+        return;
+      }
+      this._emit("remoteStream", e.streams[0] || new MediaStream([track]));
+    };
+
     if (this.role === "controller") {
       this._attachChannel(this.pc.createDataChannel("control", { ordered: true }));
       this._attachChannel(this.pc.createDataChannel("file", { ordered: true }));
       this._attachChannel(this.pc.createDataChannel("meta", { ordered: true }));
-      this.pc.ontrack = (e) => this._emit("remoteStream", e.streams[0]);
     } else {
       await this._startCapture();
     }
@@ -139,6 +190,222 @@ export class PeerSession {
     if (track) this.pc.addTrack(track, this._captureStream);
   }
 
+  // ---------- 语音 / 摄像头 ----------
+  //
+  // 角色分工（协议 5.5 节）：
+  //   · 只有被控端采集；控制端仅接收。
+  //   · 控制端发 media_req 表达「我要听/要看」，被控端按政策位 + 系统权限决定能不能给。
+  //   · 被控端每次状态变化都回 media_state，失败附 reason。
+  //   · 关闭用 replaceTrack(null) 保留 m-line，重新打开无需重协商。
+
+  /** 被控端按需追加上/移除轨道后重新协商（新增轨道必须走一次 offer/answer）。 */
+  _renegotiate() {
+    this._offerChain = this._offerChain
+      .then(() => this._doRenegotiate())
+      .catch((e) => console.warn("renegotiate failed", e));
+  }
+
+  async _doRenegotiate() {
+    for (let i = 0; i < 20; i++) {
+      if (this.closed || !this.pc || !this.pc.currentRemoteDescription) return;
+      if (this.pc.signalingState === "stable") break;
+      await sleep(100);
+    }
+    if (this.closed || !this.pc || this.pc.signalingState === "closed") return;
+    try {
+      this._renegotiating = true;
+      const offer = await this.pc.createOffer();
+      await this.pc.setLocalDescription(offer);
+      this.signaling.send({
+        type: "offer",
+        to: this.peerDeviceId,
+        session_id: this.sessionId,
+        sdp: offer.sdp,
+      });
+    } finally {
+      this._renegotiating = false;
+    }
+  }
+
+  /** 控制端：表达希望听到/看到的媒体。 */
+  requestMedia(desired) {
+    if (this.role !== "controller") return;
+    this.desired = {
+      mic: desired && desired.mic === true,
+      camera: desired && desired.camera === true,
+    };
+    this.sendMeta({ t: "media_req", mic: this.desired.mic, camera: this.desired.camera });
+    this._emit("mediaState", { ...this.media, desired: { ...this.desired } });
+  }
+
+  /** 控制端：切换某一路。 */
+  toggleMedia(kind) {
+    if (this.role !== "controller") return;
+    const cur = this.desired || { mic: false, camera: false };
+    const next = { ...cur, [kind === "camera" ? "camera" : "mic"]: !cur[kind === "camera" ? "camera" : "mic"] };
+    this.requestMedia(next);
+  }
+
+  /** 被控端：响应 media_req（串行处理，避免并发 getUserMedia 把设备抢崩）。 */
+  async _applyMediaRequest(msg) {
+    if (this._mediaBusy) {
+      this._pendingMediaReq = msg;
+      return;
+    }
+    this._mediaBusy = true;
+    try {
+      if (msg.mic === true) await this._openMic();
+      else await this._closeMic();
+      if (msg.camera === true) await this._openCam();
+      else await this._closeCam();
+    } finally {
+      this._mediaBusy = false;
+      const next = this._pendingMediaReq;
+      this._pendingMediaReq = null;
+      if (next) await this._applyMediaRequest(next);
+    }
+  }
+
+  async _openMic() {
+    if (this.role !== "controlled" || this.closed) return;
+    if (!this.policy.mic) {
+      this.media = { ...this.media, micOn: false, reason: "policy_off" };
+      this._sendMediaState();
+      return;
+    }
+    if (this._micStream) {
+      this.media = { ...this.media, micOn: true, reason: "" };
+      this._sendMediaState();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: false,
+      });
+      const track = stream.getAudioTracks()[0];
+      if (!track) throw Object.assign(new Error("no audio track"), { name: "NotFoundError" });
+      this._micStream = stream;
+      if (this._micSender) await this._micSender.replaceTrack(track);
+      else this._micSender = this.pc.addTrack(track, stream);
+      track.onended = () => this._closeMic("no_device");
+      this.media = { ...this.media, mic: true, micOn: true, reason: "" };
+      this.sendMeta(makeTrackAnnounce("mic", track.id));
+      this._sendMediaState();
+    } catch (e) {
+      console.warn("open mic failed", e);
+      this._onMediaError("mic", e);
+    }
+  }
+
+  async _closeMic(reason = "") {
+    try {
+      if (this._micSender) await this._micSender.replaceTrack(null);
+    } catch (e) {
+      console.warn("replaceTrack(mic,null) failed", e);
+    }
+    if (this._micStream) {
+      this._micStream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {}
+      });
+      this._micStream = null;
+    }
+    this.media = { ...this.media, micOn: false, reason };
+    if (this.role === "controlled") this._sendMediaState();
+  }
+
+  async _openCam() {
+    if (this.role !== "controlled" || this.closed) return;
+    if (!this.policy.camera) {
+      this.media = { ...this.media, camOn: false, reason: "policy_off" };
+      this._sendMediaState();
+      return;
+    }
+    if (this._camStream) {
+      this.media = { ...this.media, camOn: true, reason: "" };
+      this._sendMediaState();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { max: 20 }, facingMode: "user" },
+      });
+      const track = stream.getVideoTracks()[0];
+      if (!track) throw Object.assign(new Error("no camera track"), { name: "NotFoundError" });
+      this._camStream = stream;
+      if (this._camSender) await this._camSender.replaceTrack(track);
+      else this._camSender = this.pc.addTrack(track, stream); // 触发 onnegotiationneeded
+      track.onended = () => this._closeCam("no_device");
+      this.media = { ...this.media, camera: true, camOn: true, reason: "" };
+      this.sendMeta(makeTrackAnnounce("camera", track.id));
+      this._sendMediaState();
+    } catch (e) {
+      console.warn("open camera failed", e);
+      this._onMediaError("camera", e);
+    }
+  }
+
+  async _closeCam(reason = "") {
+    try {
+      if (this._camSender) await this._camSender.replaceTrack(null);
+    } catch (e) {
+      console.warn("replaceTrack(cam,null) failed", e);
+    }
+    if (this._camStream) {
+      this._camStream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {}
+      });
+      this._camStream = null;
+    }
+    this.media = { ...this.media, camOn: false, reason };
+    if (this.role === "controlled") this._sendMediaState();
+  }
+
+  /** 被控端：用户在横幅上直接关掉某一路（不经过控制端）。 */
+  async stopLocalMedia(kind) {
+    if (this.role !== "controlled") return;
+    if (kind === "camera") await this._closeCam();
+    else await this._closeMic();
+  }
+
+  _onMediaError(kind, err) {
+    const hint = permissionHint(kind, err);
+    this.media = {
+      ...this.media,
+      micOn: kind === "mic" ? false : this.media.micOn,
+      camOn: kind === "camera" ? false : this.media.camOn,
+      reason: hint.reason,
+    };
+    this._emit("mediaProblem", hint);
+    this._sendMediaState();
+  }
+
+  _sendMediaState() {
+    this.sendMeta(makeMediaState(this.media));
+    this._emit("mediaState", { ...this.media });
+  }
+
+  /** 结束会话时务必停掉采集（否则系统麦克风/摄像头指示灯会一直亮）。 */
+  stopAllMedia() {
+    for (const s of [this._micStream, this._camStream]) {
+      if (!s) continue;
+      s.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {}
+      });
+    }
+    this._micStream = null;
+    this._camStream = null;
+    this._micSender = null;
+    this._camSender = null;
+  }
+
   _attachChannel(ch) {
     this.channels[ch.label] = ch;
     ch.binaryType = "arraybuffer";
@@ -147,6 +414,10 @@ export class PeerSession {
       // 通道刚就绪时补发一次画面尺寸（可能早于首帧产生了 _localSize）
       if (ch.label === "meta" && this._localSize) {
         this.sendMeta({ t: "screen", w: this._localSize.w, h: this._localSize.h });
+      }
+      // 用户在通道就绪前就点了「语音/摄像头」→ 这里补发一次请求
+      if (ch.label === "meta" && this.role === "controller" && this.desired) {
+        this.sendMeta({ t: "media_req", mic: this.desired.mic, camera: this.desired.camera });
       }
     };
     ch.onmessage = (e) => {
@@ -335,6 +606,35 @@ export class PeerSession {
       this._emit("peerScreen", this._peerSize);
       return;
     }
+    // ---- 语音 / 摄像头 ----
+    if (msg && msg.t === "media_state") {
+      this.media = parseMediaState(msg, this.media);
+      this._emit("mediaState", { ...this.media });
+      // 控制端希望开但被控端没开成 → 把原因抛给 UI 做可操作提示
+      if (this.role === "controller" && this.desired && this.media.reason) {
+        const wantMic = this.desired.mic && !this.media.micOn;
+        const wantCam = this.desired.camera && !this.media.camOn;
+        if (wantMic || wantCam) {
+          const kind = wantMic ? "mic" : "camera";
+          this._emit("mediaProblem", {
+            reason: this.media.reason,
+            kind,
+            what: kind === "mic" ? "麦克风" : "摄像头",
+            canOpenSettings: false,
+            text: reasonText(this.media.reason),
+          });
+        }
+      }
+      return;
+    }
+    if (msg && msg.t === "media_req") {
+      if (this.role === "controlled") this._applyMediaRequest(msg);
+      return;
+    }
+    if (msg && msg.t === "media_track") {
+      this._trackKinds = trackKindMap(this._trackKinds, msg);
+      return;
+    }
     this._emit("meta", msg);
   }
 
@@ -387,6 +687,8 @@ export class PeerSession {
   async close() {
     if (this.closed) return;
     this.closed = true;
+    // 先放设备：麦克风/摄像头指示灯必须立刻熄灭，不能等 pc.close()
+    this.stopAllMedia();
     try {
       if (this._unlistenFrame) this._unlistenFrame();
     } catch {}

@@ -19,6 +19,15 @@ object SessionHub {
         fun onProgress(text: String, pct: Int)
         fun onEnded(reason: String)
         fun onPeerScreen(width: Int, height: Int) {}
+
+        /** 对方摄像头画面（画中画渲染）。 */
+        fun onRemoteCamera(track: VideoTrack) {}
+
+        /** 媒体状态变化：policy 为政策位，on 为是否真的在采集。 */
+        fun onMediaState(mic: Boolean, camera: Boolean, micOn: Boolean, camOn: Boolean, reason: String) {}
+
+        /** 本机设备打开失败（权限被拒 / 无设备 / 被占用）。 */
+        fun onMediaProblem(kind: String, reason: String) {}
     }
 
     @Volatile
@@ -45,6 +54,19 @@ object SessionHub {
     var turn: TurnInfo? = null
         private set
 
+    /** 被控端的媒体政策位（来自服务端 control_start / 本机设置）。 */
+    @Volatile
+    var policy: MediaPolicy = MediaPolicy.NONE
+        private set
+
+    @Volatile
+    var micOn: Boolean = false
+        private set
+
+    @Volatile
+    var camOn: Boolean = false
+        private set
+
     var signaling: Signaling? = null
 
     @Volatile
@@ -61,7 +83,8 @@ object SessionHub {
         role: String,
         sessionId: String,
         peer: String,
-        controllerName: String = ""
+        controllerName: String = "",
+        policy: MediaPolicy = MediaPolicy.NONE
     ) {
         detachSilently()
         this.rtc = client
@@ -69,11 +92,39 @@ object SessionHub {
         this.sessionId = sessionId
         this.peerDeviceId = peer
         this.controllerName = controllerName
+        this.policy = policy
+        this.micOn = false
+        this.camOn = false
         this.silent = false
 
         client.listener = object : RtcClient.Listener {
             override fun onRemoteTrack(track: VideoTrack) {
                 listener?.onRemoteTrack(track)
+            }
+
+            override fun onRemoteCamera(track: VideoTrack) {
+                listener?.onRemoteCamera(track)
+            }
+
+            override fun onRemoteAudio() {
+                listener?.onState("已接入对方语音")
+            }
+
+            override fun onMediaState(
+                mic: Boolean,
+                camera: Boolean,
+                micOn: Boolean,
+                camOn: Boolean,
+                reason: String
+            ) {
+                this@SessionHub.policy = MediaPolicy(mic, camera)
+                this@SessionHub.micOn = micOn
+                this@SessionHub.camOn = camOn
+                listener?.onMediaState(mic, camera, micOn, camOn, reason)
+            }
+
+            override fun onMediaProblem(kind: String, reason: String) {
+                listener?.onMediaProblem(kind, reason)
             }
 
             override fun onReady() {
@@ -128,6 +179,22 @@ object SessionHub {
 
     fun sendMeta(obj: JSONObject) {
         rtc?.sendMeta(obj)
+    }
+
+    /** 控制端：请求 / 停止接收对方的麦克风与摄像头。 */
+    fun requestRemoteMedia(mic: Boolean, camera: Boolean) {
+        rtc?.requestRemoteMedia(mic, camera)
+    }
+
+    /** 被控端：横幅上直接关掉某一路。 */
+    fun stopLocalMedia(kind: String) {
+        rtc?.stopLocalMedia(kind)
+    }
+
+    /** 被控端：设置变更后同步政策位。 */
+    fun applyPolicy(p: MediaPolicy) {
+        policy = p
+        rtc?.applyMediaPolicy(p)
     }
 
     /** 主动结束（本端发起）。会同时通知服务器关闭会话。 */
@@ -188,5 +255,8 @@ object SessionHub {
         peerDeviceId = ""
         controllerName = ""
         turn = null
+        policy = MediaPolicy.NONE
+        micOn = false
+        camOn = false
     }
 }

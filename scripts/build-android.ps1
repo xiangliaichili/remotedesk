@@ -82,9 +82,15 @@ if ($env:GRADLE_BIN -and (Test-Path $env:GRADLE_BIN)) {
 } elseif (Test-Path (Join-Path $dir "gradlew.bat")) {
     $gradle = Join-Path $dir "gradlew.bat"
 } else {
-    $tools = Join-Path (Split-Path -Parent $root) ".tools"
-    foreach ($c in @((Join-Path $tools "gradle-8.9\bin\gradle.bat"), (Join-Path $tools "gradle\bin\gradle.bat"))) {
-        if (Test-Path $c) { $gradle = $c; break }
+    $toolsDirs = @((Join-Path $root ".tools"), (Join-Path (Split-Path -Parent $root) ".tools"))
+    foreach ($tools in $toolsDirs) {
+        foreach ($c in @(
+                (Join-Path $tools "gradle-home\gradle-8.9\bin\gradle.bat"),
+                (Join-Path $tools "gradle-8.9\bin\gradle.bat"),
+                (Join-Path $tools "gradle\bin\gradle.bat"))) {
+            if (Test-Path $c) { $gradle = $c; break }
+        }
+        if ($gradle) { break }
     }
     if (-not $gradle) {
         $g = Get-Command gradle -ErrorAction SilentlyContinue

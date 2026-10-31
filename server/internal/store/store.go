@@ -3,8 +3,11 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
+	"strconv"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -16,7 +19,33 @@ type User struct {
 	ID           int64     `json:"id"`
 	Username     string    `json:"username"`
 	PasswordHash string    `json:"-"`
-	CreatedAt    time.Time `json:"created_at"`
+	// 手机号（短信验证码登录用），未绑定为 NULL
+	Phone string `json:"phone,omitempty"`
+	// 微信身份：openid 是单应用维度，unionid 是开放平台账号维度（多应用打通）
+	WechatOpenID  string    `json:"-"`
+	WechatUnionID string    `json:"-"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// SMSRecord 是一条待校验的短信验证码。
+type SMSRecord struct {
+	Phone     string
+	Code      string
+	ExpiresAt time.Time
+	Attempts  int
+	SentAt    time.Time
+}
+
+// AuthState 是微信扫码登录的一次性状态（客户端轮询它拿结果）。
+type AuthState struct {
+	State      string
+	Status     string // pending | ok | error
+	UserID     int64
+	DeviceID   string
+	DeviceName string
+	OS         string
+	Err        string
+	ExpiresAt  time.Time
 }
 
 type Device struct {
@@ -110,6 +139,25 @@ func (s *Store) migrate() error {
 			used INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// 短信验证码：一个手机号同时只有一条有效记录，重发即覆盖
+		`CREATE TABLE IF NOT EXISTS sms_codes (
+			phone TEXT PRIMARY KEY,
+			code TEXT NOT NULL,
+			expires_at DATETIME NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			sent_at DATETIME NOT NULL
+		)`,
+		// 微信扫码登录状态：客户端轮询 pending → ok/error
+		`CREATE TABLE IF NOT EXISTS auth_states (
+			state TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			user_id INTEGER,
+			device_id TEXT,
+			device_name TEXT,
+			os TEXT,
+			err TEXT,
+			expires_at DATETIME NOT NULL
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_target ON sessions(target_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_links_code ON links(code)`,
@@ -119,7 +167,61 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+
+	// 老库补列：CREATE TABLE IF NOT EXISTS 不会修改已存在的表结构。
+	// 新增列必须允许 NULL，否则老数据无法回填。
+	columns := []struct{ name, decl string }{
+		{"phone", "TEXT"},
+		{"wechat_openid", "TEXT"},
+		{"wechat_unionid", "TEXT"},
+	}
+	for _, c := range columns {
+		if err := s.ensureColumn("users", c.name, c.decl); err != nil {
+			return err
+		}
+	}
+	// 唯一索引要在列补齐之后再建（NULL 不参与唯一性约束，未绑定的用户互不冲突）
+	indexes := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_wechat ON users(wechat_openid)`,
+	}
+	for _, q := range indexes {
+		if _, err := s.db.Exec(q); err != nil {
+			return err
+		}
+	}
+	_ = s.CleanupExpired(context.Background())
 	return nil
+}
+
+// ensureColumn 在列不存在时执行 ALTER TABLE ADD COLUMN（SQLite 的加列是轻量操作）。
+func (s *Store) ensureColumn(table, column, decl string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notNull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + decl)
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -146,11 +248,16 @@ func (s *Store) CreateUser(ctx context.Context, username, passwordHash string) (
 	return &User{ID: id, Username: username, PasswordHash: passwordHash}, nil
 }
 
-func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, error) {
+// userColumns 统一查询列顺序，新增列时只改这里（scanUser 跟着改）。
+const userColumns = `id, username, password_hash, COALESCE(phone,''), COALESCE(wechat_openid,''), COALESCE(wechat_unionid,''), created_at`
+
+type rowScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+func scanUser(row rowScanner) (*User, error) {
 	u := &User{}
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, username, password_hash, created_at FROM users WHERE username = ?`,
-		username).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Phone, &u.WechatOpenID, &u.WechatUnionID, &u.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -158,6 +265,205 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, 
 		return nil, err
 	}
 	return u, nil
+}
+
+func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, error) {
+	return scanUser(s.db.QueryRowContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE username = ?`, username))
+}
+
+// GetUserByPhone 手机号登录用。
+func (s *Store) GetUserByPhone(ctx context.Context, phone string) (*User, error) {
+	return scanUser(s.db.QueryRowContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE phone = ?`, phone))
+}
+
+// GetUserByID 微信轮询、令牌刷新等场景按主键取用户。
+func (s *Store) GetUserByID(ctx context.Context, id int64) (*User, error) {
+	return scanUser(s.db.QueryRowContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE id = ?`, id))
+}
+
+// GetUserByWechat 微信登录用：先按 openid 匹配，再按 unionid 兜底
+// （同一开放平台账号下换了应用，openid 会变而 unionid 不变）。
+func (s *Store) GetUserByWechat(ctx context.Context, openID, unionID string) (*User, error) {
+	u, err := scanUser(s.db.QueryRowContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE wechat_openid = ?`, openID))
+	if err == nil || err != ErrNotFound {
+		return u, err
+	}
+	if unionID == "" {
+		return nil, ErrNotFound
+	}
+	return scanUser(s.db.QueryRowContext(ctx,
+		`SELECT `+userColumns+` FROM users WHERE wechat_unionid = ?`, unionID))
+}
+
+// unusablePassword 给「没有密码的账号」占位：不是合法 bcrypt 串，
+// bcrypt.CompareHashAndPassword 永远失败，因此这些账号无法用密码登录。
+const unusablePassword = "!"
+
+// CreateUserWithPhone 首次用手机号登录时自动建号，用户名即手机号。
+func (s *Store) CreateUserWithPhone(ctx context.Context, phone string) (*User, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO users (username, password_hash, phone) VALUES (?, ?, ?)`,
+		phone, unusablePassword, phone)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrUserExists
+		}
+		return nil, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	return &User{ID: id, Username: phone, PasswordHash: unusablePassword, Phone: phone}, nil
+}
+
+// CreateUserWithWechat 首次微信登录时自动建号，用户名用 wx_ + 随机后缀。
+func (s *Store) CreateUserWithWechat(ctx context.Context, openID, unionID string) (*User, error) {
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		username := "wx_" + randomHex(5)
+		res, err := s.db.ExecContext(ctx,
+			`INSERT INTO users (username, password_hash, wechat_openid, wechat_unionid) VALUES (?, ?, ?, ?)`,
+			username, unusablePassword, openID, nullable(unionID))
+		if err == nil {
+			id, err := res.LastInsertId()
+			if err != nil {
+				return nil, err
+			}
+			return &User{
+				ID:            id,
+				Username:      username,
+				PasswordHash:  unusablePassword,
+				WechatOpenID:  openID,
+				WechatUnionID: unionID,
+			}, nil
+		}
+		lastErr = err
+		if !isUniqueViolation(err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+var ErrPhoneTaken = errors.New("phone already bound to another account")
+var ErrWechatTaken = errors.New("wechat already bound to another account")
+
+// BindPhone 给已有账号补绑手机号（例如先用微信登录、之后想用短信登录同一账号）。
+func (s *Store) BindPhone(ctx context.Context, userID int64, phone string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET phone = ? WHERE id = ?`, phone, userID)
+	if err != nil && isUniqueViolation(err) {
+		return ErrPhoneTaken
+	}
+	return err
+}
+
+// BindWechat 给已有账号补绑微信。
+func (s *Store) BindWechat(ctx context.Context, userID int64, openID, unionID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET wechat_openid = ?, wechat_unionid = ? WHERE id = ?`,
+		openID, nullable(unionID), userID)
+	if err != nil && isUniqueViolation(err) {
+		return ErrWechatTaken
+	}
+	return err
+}
+
+// ---------- 短信验证码 ----------
+
+// SaveSMS 写入/覆盖某手机号的验证码，并把尝试次数清零。
+func (s *Store) SaveSMS(ctx context.Context, phone, code string, ttl time.Duration) error {
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO sms_codes (phone, code, expires_at, attempts, sent_at)
+		VALUES (?, ?, ?, 0, ?)
+		ON CONFLICT(phone) DO UPDATE SET
+			code = excluded.code,
+			expires_at = excluded.expires_at,
+			attempts = 0,
+			sent_at = excluded.sent_at`,
+		phone, code, now.Add(ttl), now)
+	return err
+}
+
+func (s *Store) GetSMS(ctx context.Context, phone string) (*SMSRecord, error) {
+	r := &SMSRecord{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT phone, code, expires_at, attempts, sent_at FROM sms_codes WHERE phone = ?`, phone).
+		Scan(&r.Phone, &r.Code, &r.ExpiresAt, &r.Attempts, &r.SentAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// IncSMSAttempt 校验失败时累加次数，超过阈值由调用方决定是否作废。
+func (s *Store) IncSMSAttempt(ctx context.Context, phone string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sms_codes SET attempts = attempts + 1 WHERE phone = ?`, phone)
+	return err
+}
+
+func (s *Store) DeleteSMS(ctx context.Context, phone string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sms_codes WHERE phone = ?`, phone)
+	return err
+}
+
+// ---------- 微信登录状态 ----------
+
+func (s *Store) SaveAuthState(ctx context.Context, st *AuthState, ttl time.Duration) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO auth_states (state, status, user_id, device_id, device_name, os, err, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(state) DO UPDATE SET
+			status = excluded.status,
+			expires_at = excluded.expires_at`,
+		st.State, orPending(st.Status), nullableInt(st.UserID), st.DeviceID, st.DeviceName, st.OS, st.Err,
+		time.Now().Add(ttl))
+	return err
+}
+
+func (s *Store) SetAuthStateResult(ctx context.Context, state, status string, userID int64, errMsg string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE auth_states SET status = ?, user_id = ?, err = ? WHERE state = ?`,
+		status, nullableInt(userID), errMsg, state)
+	return err
+}
+
+func (s *Store) GetAuthState(ctx context.Context, state string) (*AuthState, error) {
+	st := &AuthState{}
+	var userID sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT state, status, user_id, COALESCE(device_id,''), COALESCE(device_name,''), COALESCE(os,''),
+		       COALESCE(err,''), expires_at
+		FROM auth_states WHERE state = ?`, state).
+		Scan(&st.State, &st.Status, &userID, &st.DeviceID, &st.DeviceName, &st.OS, &st.Err, &st.ExpiresAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if userID.Valid {
+		st.UserID = userID.Int64
+	}
+	return st, nil
+}
+
+// CleanupExpired 清理过期验证码与登录状态（启动时与后台各跑一次）。
+func (s *Store) CleanupExpired(ctx context.Context) error {
+	now := time.Now()
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM sms_codes WHERE expires_at < ?`, now); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM auth_states WHERE expires_at < ?`, now)
+	return err
 }
 
 // ---------- 设备 ----------
@@ -337,4 +643,36 @@ func boolPtrToInt(b *bool) *int {
 	}
 	v := boolToInt(*b)
 	return &v
+}
+
+// nullable 空串存 NULL：唯一索引对 NULL 不生效，未绑定的用户才不会互相冲突。
+func nullable(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nullableInt(n int64) interface{} {
+	if n == 0 {
+		return nil
+	}
+	return n
+}
+
+func orPending(s string) string {
+	if s == "" {
+		return "pending"
+	}
+	return s
+}
+
+// randomHex 生成 n 字节随机数的十六进制串（用户名后缀、验证码盐等用途）。
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		// 熵源不可用时退化为时间戳，宁可弱一点也不阻塞登录
+		return strconv.FormatInt(time.Now().UnixNano(), 16)[:n*2]
+	}
+	return hex.EncodeToString(b)
 }

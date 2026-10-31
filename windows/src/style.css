@@ -89,6 +89,24 @@ input:focus { border-color: var(--accent); }
 .error { color: #ff8b8b; font-size: 13px; margin: 0; min-height: 16px; }
 .hint { color: var(--muted); font-size: 12px; margin: 0; }
 
+/* ---------- 登录方式切换 ---------- */
+.auth-tabs {
+  display: flex; gap: 4px; padding: 4px;
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 10px;
+}
+.auth-tabs .tab {
+  flex: 1; padding: 8px 6px; font-size: 13px; cursor: pointer;
+  background: transparent; border: none; border-radius: 8px; color: var(--muted);
+  transition: 0.15s;
+}
+.auth-tabs .tab:hover { color: var(--fg); }
+.auth-tabs .tab.active { background: var(--accent2); color: #fff; }
+
+.tab-panel { display: flex; flex-direction: column; gap: 12px; }
+#btn-wx-reopen { align-self: flex-start; }
+#sms-code { flex: 1; }
+#btn-sms-send { white-space: nowrap; min-width: 96px; }
+
 /* ---------- 顶栏 & 主页 ---------- */
 .topbar {
   display: flex;
@@ -179,3 +197,40 @@ input:focus { border-color: var(--accent); }
 }
 .toast-body { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .toast p { margin: 0; font-size: 13px; }
+.toast-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ---------- 语音 / 摄像头 ---------- */
+.media-btn.on {
+  background: rgba(59, 130, 246, 0.18);
+  border-color: var(--accent);
+  color: #9ec5ff;
+}
+.media-state { font-size: 12px; color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.camera-pip {
+  position: absolute; right: 16px; top: 16px; width: 220px; height: 165px;
+  background: #000; border: 1px solid var(--line); border-radius: 10px;
+  overflow: hidden; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+#remote-camera { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pip-close {
+  position: absolute; right: 4px; top: 4px; width: 22px; height: 22px;
+  border-radius: 50%; border: none; cursor: pointer;
+  background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 14px; line-height: 1;
+}
+.pip-close:hover { background: var(--danger); }
+
+.media-note { margin: 0; font-size: 12px; color: var(--accent); }
+
+.check-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
+.check-list li { display: flex; align-items: center; gap: 8px; }
+.check-list .check-name { flex: 1; }
+
+.history { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
+.history p { margin: 0; }
+.history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.history-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; background: var(--bg2); border-radius: 8px; font-size: 13px;
+}
+.history-item .hist-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

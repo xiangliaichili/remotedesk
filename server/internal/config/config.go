@@ -31,6 +31,27 @@ type Config struct {
 	HeartbeatTimeout int
 	// 一次性链接默认有效期（分钟）
 	LinkTTLMinutes int
+
+	// ---------- 登录方式（v1.03） ----------
+
+	// 短信服务商：mock（默认，只打印日志）/ aliyun / off（关闭短信登录）
+	SMSProvider string
+	// 短信签名与模板（阿里云控制台申请），模板里用 ${code} 占位
+	SMSSign     string
+	SMSTemplate string
+	// 开发模式：日志打印验证码、响应里回 dev_code、开放 /api/auth/wechat/dev
+	SMSDevMode bool
+	// 阿里云 AccessKey（建议只授 dysms:SendSms 权限的 RAM 子账号）
+	AliyunKeyID  string
+	AliyunSecret string
+
+	// 微信开放平台「网站应用」的 AppID / AppSecret（扫码登录用）
+	WechatAppID  string
+	WechatSecret string
+	// 回调基址（对外可访问的地址，如 https://rd.example.com），用于拼 redirect_uri
+	WechatRedirect string
+	// 允许调用 /api/auth/wechat/dev 模拟扫码（仅本地联调）
+	AuthDev bool
 }
 
 // Load 解析配置。
@@ -48,9 +69,31 @@ func Load() *Config {
 	flag.StringVar(&cfg.KeyFile, "key", envStr("RD_KEY", ""), "TLS 私钥文件")
 	flag.IntVar(&cfg.HeartbeatTimeout, "heartbeat", envInt("RD_HEARTBEAT", 60), "心跳超时（秒）")
 	flag.IntVar(&cfg.LinkTTLMinutes, "link-ttl", envInt("RD_LINK_TTL", 10), "一次性链接有效期（分钟）")
+
+	flag.StringVar(&cfg.SMSProvider, "sms-provider", envStr("RD_SMS_PROVIDER", "mock"), "短信服务商：mock|aliyun|off")
+	flag.StringVar(&cfg.SMSSign, "sms-sign", envStr("RD_SMS_SIGN", ""), "短信签名（阿里云）")
+	flag.StringVar(&cfg.SMSTemplate, "sms-template", envStr("RD_SMS_TEMPLATE", ""), "短信模板 CODE（阿里云）")
+	flag.BoolVar(&cfg.SMSDevMode, "sms-dev", envBool("RD_SMS_DEV", false), "短信开发模式：日志打印验证码并在响应里回 dev_code")
+	flag.StringVar(&cfg.AliyunKeyID, "aliyun-key-id", envStr("RD_ALIYUN_KEY_ID", ""), "阿里云 AccessKeyId")
+	flag.StringVar(&cfg.AliyunSecret, "aliyun-key-secret", envStr("RD_ALIYUN_KEY_SECRET", ""), "阿里云 AccessKeySecret")
+
+	flag.StringVar(&cfg.WechatAppID, "wechat-app-id", envStr("RD_WECHAT_APP_ID", ""), "微信开放平台网站应用 AppID")
+	flag.StringVar(&cfg.WechatSecret, "wechat-app-secret", envStr("RD_WECHAT_APP_SECRET", ""), "微信开放平台网站应用 AppSecret")
+	flag.StringVar(&cfg.WechatRedirect, "wechat-redirect", envStr("RD_WECHAT_REDIRECT", ""), "回调基址（如 https://rd.example.com）")
+	flag.BoolVar(&cfg.AuthDev, "auth-dev", envBool("RD_AUTH_DEV", false), "开放 /api/auth/wechat/dev 模拟扫码（仅本地联调）")
 	flag.Parse()
 
 	return cfg
+}
+
+// WechatEnabled 微信扫码登录是否可用（缺 AppID/Secret 就当作没配）。
+func (c *Config) WechatEnabled() bool {
+	return c.WechatAppID != "" && c.WechatSecret != ""
+}
+
+// SMSEnabled 短信验证码登录是否可用。
+func (c *Config) SMSEnabled() bool {
+	return c.SMSProvider != "" && c.SMSProvider != "off"
 }
 
 func envStr(key, def string) string {

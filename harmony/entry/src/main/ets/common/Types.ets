@@ -1,6 +1,6 @@
 /**
  * 与中转服务器交互的通用数据结构。
- * 字段名与 docs/protocol.md 保持一致（snake_case）。
+ * 字段名与 README《协议规范》一致（snake_case）。
  */
 
 export interface DeviceItem {
@@ -8,12 +8,20 @@ export interface DeviceItem {
   name: string;
   os: string;
   online: boolean;
+  mic_enabled?: boolean;
+  camera_enabled?: boolean;
 }
 
 export interface TurnInfo {
   urls: string[];
   username: string;
   credential: string;
+}
+
+/** 会话下发的媒体权限位（协议 4.2 节）。 */
+export interface MediaPolicy {
+  mic: boolean;
+  camera: boolean;
 }
 
 export interface AuthResult {
@@ -27,6 +35,7 @@ export interface SessionResult {
   session_id: string;
   status: string;
   turn?: TurnInfo;
+  media?: MediaPolicy;
 }
 
 export interface LinkResult {
@@ -39,6 +48,32 @@ export interface SettingsResult {
   auto_accept_same_account: boolean;
   mic_enabled: boolean;
   camera_enabled: boolean;
+}
+
+/** 服务端支持的登录方式（v1.03）。 */
+export interface AuthMethods {
+  smsEnabled: boolean;
+  smsDev: boolean;
+  smsProvider: string;
+  wechatEnabled: boolean;
+  wechatDev: boolean;
+}
+
+/** 微信扫码会话。 */
+export interface WechatSession {
+  state: string;
+  url: string;
+  expiresIn: number;
+}
+
+/** 微信轮询结果：pending / ok / error / expired / consumed。 */
+export interface WechatPollResult {
+  status: string;
+  message: string;
+  token: string;
+  userId: number;
+  deviceId: string;
+  username: string;
 }
 
 export interface DeviceListResult {
@@ -79,15 +114,18 @@ export interface SignalMessage {
 export interface SessionReqData {
   controller_name: string;
   auth_mode: string;
+  media?: MediaPolicy;
 }
 
 export interface ControlStartData {
   controller_name: string;
   turn: TurnInfo;
+  media?: MediaPolicy;
 }
 
 export interface SessionOkData {
   turn: TurnInfo;
+  media?: MediaPolicy;
 }
 
 export interface ErrorData {

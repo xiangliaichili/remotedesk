@@ -8,6 +8,9 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import org.json.JSONObject
+import org.webrtc.AudioSource
+import org.webrtc.AudioTrack
+import org.webrtc.Camera2Enumerator
 import org.webrtc.DataChannel
 import org.webrtc.EglBase
 import org.webrtc.IceCandidate
@@ -15,10 +18,12 @@ import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.RtpReceiver
+import org.webrtc.RtpSender
 import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
+import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import java.io.File
@@ -31,24 +36,33 @@ import java.util.concurrent.Executors
  *
  * 角色约定（三端一致）：
  *  · controller —— 发起方，创建三条数据通道，并负责 createOffer。
- *  · controlled —— 被控方，只负责屏幕采集与 answer。
+ *  · controlled —— 被控方，负责屏幕采集与 answer，并按需追加麦克风/摄像头轨道。
  *
  * 数据通道分工：
  *  · control —— 输入事件（JSON 文本）
- *  · meta    —— 元信息与文件控制消息（JSON 文本）
+ *  · meta    —— 元信息、文件控制、媒体协商（JSON 文本）
  *  · file    —— 仅二进制文件块
+ *
+ * 语音 / 摄像头（v1.02）：
+ *  · 只有被控方采集；控制方只接收（远端音频由 JavaAudioDeviceModule 自动播放）。
+ *  · 控制方发 media_req 表达「我要听/要看」，被控方按政策位 + 运行时权限决定。
+ *  · 被控方每次状态变化回 media_state；追加/移除轨道时由被控方重协商（发第二次 offer）。
  */
 class RtcClient(
     val role: String,
     val sessionId: String,
     val peerDeviceId: String,
     private val turn: TurnInfo?,
-    private val signaling: Signaling
+    private val signaling: Signaling,
+    mediaPolicy: MediaPolicy? = null
 ) {
 
     companion object {
         private const val TAG = "RtcClient"
         private const val CHUNK = 48 * 1024
+        private const val CAM_W = 640
+        private const val CAM_H = 480
+        private const val CAM_FPS = 20
     }
 
     val isController: Boolean get() = role == "controller"
@@ -62,6 +76,18 @@ class RtcClient(
         fun onInfo(text: String)
         fun onFileSaved(name: String, path: String)
         fun onPeerScreen(width: Int, height: Int)
+
+        /** 收到对方摄像头画面（与屏幕画面分开渲染）。 */
+        fun onRemoteCamera(track: VideoTrack) {}
+
+        /** 远端音频已接入（由 ADM 播放，这里只用于更新 UI）。 */
+        fun onRemoteAudio() {}
+
+        /** 媒体状态变化：policy 为政策位，on 为是否真的在采。 */
+        fun onMediaState(mic: Boolean, camera: Boolean, micOn: Boolean, camOn: Boolean, reason: String) {}
+
+        /** 本机打开设备失败（权限被拒 / 无设备 / 被占用）。 */
+        fun onMediaProblem(kind: String, reason: String) {}
     }
 
     var listener: Listener? = null
@@ -89,6 +115,35 @@ class RtcClient(
     @Volatile
     private var closed = false
     private var ctxRef: Context? = null
+
+    // ---------- 语音 / 摄像头 ----------
+    @Volatile private var policyMic = false
+    @Volatile private var policyCam = false
+    @Volatile private var micOn = false
+    @Volatile private var camOn = false
+
+    private var aSource: AudioSource? = null
+    private var aTrack: AudioTrack? = null
+    private var aSender: RtpSender? = null
+
+    private var camHelper: SurfaceTextureHelper? = null
+    private var camCapturer: VideoCapturer? = null
+    private var camSource: VideoSource? = null
+    private var camTrack: VideoTrack? = null
+    private var camSender: RtpSender? = null
+
+    /** trackId → "camera" / "mic"，对端通过 media_track 通告。 */
+    private val trackKinds = HashMap<String, String>()
+
+    @Volatile
+    private var negotiating = false
+
+    init {
+        if (mediaPolicy != null) {
+            policyMic = mediaPolicy.mic
+            policyCam = mediaPolicy.camera
+        }
+    }
 
     // 发送文件
     private var sendUri: Uri? = null
@@ -141,6 +196,15 @@ class RtcClient(
         }
     }
 
+    /** 会话建立后由外部更新政策位（例如被控端刚改了设置）。 */
+    fun applyMediaPolicy(p: MediaPolicy) {
+        policyMic = p.mic
+        policyCam = p.camera
+        if (!policyMic) closeMic()
+        if (!policyCam) closeCamera()
+        postMediaState()
+    }
+
     /**
      * 被控方：用 MediaProjection 授权结果启动屏幕采集。
      * 必须在 mediaProjection 类型的前台服务已经运行之后调用（Android 14 要求）。
@@ -189,6 +253,9 @@ class RtcClient(
     fun close(reason: String = "") {
         if (closed) return
         closed = true
+        // 先放设备：麦克风/摄像头指示灯必须立刻熄灭
+        closeMic(silent = true)
+        closeCamera(silent = true)
         stopCapture()
         try {
             io.shutdownNow()
@@ -270,8 +337,9 @@ class RtcClient(
 
     private fun createOffer() {
         val c = MediaConstraints().apply {
+            // 预置 audio/video 的接收方向：被控端后续 addTrack 可直接复用，少一次重协商
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"))
+            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
         }
         pc?.createOffer(object : SimpleSdp() {
             override fun onCreateSuccess(sdp: SessionDescription?) {
@@ -289,6 +357,46 @@ class RtcClient(
                 fail("创建 offer 失败：$err")
             }
         }, c)
+    }
+
+    /**
+     * 被控端追加/移除麦克风、摄像头轨道后重新协商。
+     * 只由被控端发起，避免双方同时 offer（glare）。
+     */
+    private fun maybeRenegotiate() {
+        if (isController || closed || !hasRemote || negotiating) return
+        if (pc == null) return
+        negotiating = true
+        pc?.createOffer(object : SimpleSdp() {
+            override fun onCreateSuccess(sdp: SessionDescription?) {
+                val d = sdp
+                if (d == null) {
+                    negotiating = false
+                    return
+                }
+                pc?.setLocalDescription(object : SimpleSdp() {
+                    override fun onSetSuccess() {
+                        negotiating = false
+                        signaling.send(JSONObject().apply {
+                            put("type", "offer")
+                            put("to", peerDeviceId)
+                            put("session_id", sessionId)
+                            put("sdp", d.description)
+                        })
+                    }
+
+                    override fun onSetFailure(err: String?) {
+                        negotiating = false
+                        Log.w(TAG, "renegotiate setLocal failed: $err")
+                    }
+                }, d)
+            }
+
+            override fun onCreateFailure(err: String?) {
+                negotiating = false
+                Log.w(TAG, "renegotiate createOffer failed: $err")
+            }
+        }, MediaConstraints())
     }
 
     fun handleOffer(sdp: String) {
@@ -363,6 +471,235 @@ class RtcClient(
         }
     }
 
+    // ---------- 语音 / 摄像头 ----------
+
+    /** 控制端：请求/停止接收对方的麦克风与摄像头。 */
+    fun requestRemoteMedia(mic: Boolean, camera: Boolean) {
+        if (!isController) return
+        sendMeta(JSONObject().apply {
+            put("t", "media_req")
+            put("mic", mic)
+            put("camera", camera)
+        })
+    }
+
+    /** 被控端：被控横幅上的「关闭麦克风 / 关闭摄像头」。 */
+    fun stopLocalMedia(kind: String) {
+        if (isController) return
+        main.post {
+            if (kind == "camera") closeCamera() else closeMic()
+        }
+    }
+
+    private fun onMediaReq(o: JSONObject) {
+        if (isController) return
+        val wantMic = o.optBoolean("mic")
+        val wantCam = o.optBoolean("camera")
+        // 采集设备必须在主线程上创建/释放
+        main.post {
+            if (wantMic) openMic() else closeMic()
+            if (wantCam) openCamera() else closeCamera()
+        }
+    }
+
+    private fun openMic() {
+        if (isController || closed) return
+        if (!policyMic) {
+            micOn = false
+            postMediaState("policy_off")
+            return
+        }
+        if (!Permissions.micGranted(App.instance)) {
+            micOn = false
+            postMediaState("permission_denied")
+            main.post { listener?.onMediaProblem("mic", "permission_denied") }
+            return
+        }
+        if (aTrack != null) {
+            micOn = true
+            postMediaState()
+            return
+        }
+        try {
+            val src = App.factory.createAudioSource(MediaConstraints())
+            if (src == null) {
+                postMediaState("unsupported")
+                return
+            }
+            val track = App.factory.createAudioTrack("rd-mic", src)
+            aSource = src
+            aTrack = track
+            aSender = pc?.addTrack(track, listOf("rd-mic"))
+            micOn = true
+            Log.i(TAG, "mic opened")
+            postMediaState()
+        } catch (e: Throwable) {
+            Log.w(TAG, "openMic failed", e)
+            micOn = false
+            postMediaState("busy")
+            main.post { listener?.onMediaProblem("mic", "busy") }
+        }
+    }
+
+    private fun closeMic(silent: Boolean = false) {
+        val track = aTrack
+        if (track == null && !silent) {
+            if (micOn) {
+                micOn = false
+                postMediaState()
+            }
+            return
+        }
+        try {
+            track?.setEnabled(false)
+        } catch (_: Throwable) {
+        }
+        try {
+            aSender?.let { s -> pc?.removeTrack(s) }
+        } catch (_: Throwable) {
+        }
+        try {
+            track?.dispose()
+        } catch (_: Throwable) {
+        }
+        try {
+            aSource?.dispose()
+        } catch (_: Throwable) {
+        }
+        aTrack = null
+        aSource = null
+        aSender = null
+        micOn = false
+        if (!silent) {
+            postMediaState()
+            maybeRenegotiate()
+        }
+    }
+
+    private fun openCamera() {
+        if (isController || closed) return
+        if (!policyCam) {
+            camOn = false
+            postMediaState("policy_off")
+            return
+        }
+        if (!Permissions.hasCamera(App.instance)) {
+            camOn = false
+            postMediaState("no_device")
+            main.post { listener?.onMediaProblem("camera", "no_device") }
+            return
+        }
+        if (!Permissions.cameraGranted(App.instance)) {
+            camOn = false
+            postMediaState("permission_denied")
+            main.post { listener?.onMediaProblem("camera", "permission_denied") }
+            return
+        }
+        if (camTrack != null) {
+            camOn = true
+            postMediaState()
+            return
+        }
+        try {
+            val enumerator = Camera2Enumerator(App.instance)
+            val name = enumerator.deviceNames.firstOrNull { enumerator.isFrontFacing(it) }
+                ?: enumerator.deviceNames.firstOrNull()
+            if (name == null) {
+                camOn = false
+                postMediaState("no_device")
+                return
+            }
+            val cap = enumerator.createCapturer(name, null)
+            if (cap == null) {
+                camOn = false
+                postMediaState("no_device")
+                return
+            }
+            val h = SurfaceTextureHelper.create("rd-camera", egl?.eglBaseContext)
+            val src = App.factory.createVideoSource(false)
+            val track = App.factory.createVideoTrack("camera0", src)
+            cap.initialize(h, App.instance, src.capturerObserver)
+            cap.startCapture(CAM_W, CAM_H, CAM_FPS)
+            camHelper = h
+            camCapturer = cap
+            camSource = src
+            camTrack = track
+            camSender = pc?.addTrack(track, listOf("rd-camera"))
+            camOn = true
+            Log.i(TAG, "camera opened ${CAM_W}x$CAM_H")
+            // 通告对端「这条 track 是摄像头」，否则两路 video 无法区分
+            sendMeta(JSONObject().apply {
+                put("t", "media_track")
+                put("kind", "camera")
+                put("id", track.id())
+            })
+            postMediaState()
+        } catch (e: Throwable) {
+            Log.w(TAG, "openCamera failed", e)
+            camOn = false
+            postMediaState("busy")
+            main.post { listener?.onMediaProblem("camera", "busy") }
+        }
+    }
+
+    private fun closeCamera(silent: Boolean = false) {
+        val track = camTrack
+        if (track == null && !silent) {
+            if (camOn) {
+                camOn = false
+                postMediaState()
+            }
+            return
+        }
+        try {
+            camCapturer?.stopCapture()
+        } catch (_: Throwable) {
+        }
+        try {
+            camCapturer?.dispose()
+        } catch (_: Throwable) {
+        }
+        try {
+            camHelper?.dispose()
+        } catch (_: Throwable) {
+        }
+        try {
+            camSender?.let { s -> pc?.removeTrack(s) }
+        } catch (_: Throwable) {
+        }
+        try {
+            track?.dispose()
+        } catch (_: Throwable) {
+        }
+        try {
+            camSource?.dispose()
+        } catch (_: Throwable) {
+        }
+        camCapturer = null
+        camHelper = null
+        camSource = null
+        camTrack = null
+        camSender = null
+        camOn = false
+        if (!silent) {
+            postMediaState()
+            maybeRenegotiate()
+        }
+    }
+
+    private fun postMediaState(reason: String = "") {
+        val o = JSONObject().apply {
+            put("t", "media_state")
+            put("mic", policyMic)
+            put("camera", policyCam)
+            put("mic_on", micOn)
+            put("cam_on", camOn)
+            if (reason.isNotEmpty()) put("reason", reason)
+        }
+        sendMeta(o)
+        main.post { listener?.onMediaState(policyMic, policyCam, micOn, camOn, reason) }
+    }
+
     // ---------- 数据通道 ----------
 
     private fun channelOf(name: String): DataChannel? = when (name) {
@@ -380,6 +717,8 @@ class RtcClient(
                 if (name == "meta") {
                     flushMeta()
                     announceScreen()
+                    // 通道就绪后补一次媒体状态，控制端可据此点亮按钮
+                    if (!isController) postMediaState()
                 }
                 main.post { listener?.onReady() }
             }
@@ -410,6 +749,22 @@ class RtcClient(
                         if (w > 0 && h > 0) main.post { listener?.onPeerScreen(w, h) }
                     }
 
+                    t == "media_req" -> onMediaReq(obj)
+                    t == "media_state" -> {
+                        val reason = obj.optString("reason")
+                        main.post {
+                            listener?.onMediaState(
+                                obj.optBoolean("mic"),
+                                obj.optBoolean("camera"),
+                                obj.optBoolean("mic_on"),
+                                obj.optBoolean("cam_on"),
+                                reason
+                            )
+                        }
+                    }
+
+                    t == "media_track" -> trackKinds[obj.optString("id")] = obj.optString("kind")
+
                     else -> main.post { listener?.onInfo(text) }
                 }
             }
@@ -433,16 +788,19 @@ class RtcClient(
     fun sendMeta(obj: JSONObject) {
         val c = cMeta
         if (c == null || c.state() != DataChannel.State.OPEN) {
-            pendingMeta.add(obj.toString())
+            synchronized(pendingMeta) { pendingMeta.add(obj.toString()) }
             return
         }
         sendText(c, obj)
     }
 
     private fun flushMeta() {
-        if (pendingMeta.isEmpty()) return
-        val list = ArrayList(pendingMeta)
-        pendingMeta.clear()
+        val list = synchronized(pendingMeta) {
+            val snapshot = ArrayList(pendingMeta)
+            pendingMeta.clear()
+            snapshot
+        }
+        if (list.isEmpty()) return
         for (s in list) {
             val obj = runCatching { JSONObject(s) }.getOrNull() ?: continue
             sendText(cMeta, obj)
@@ -708,12 +1066,30 @@ class RtcClient(
             ch.registerObserver(channelObserver(ch.label()))
         }
 
-        override fun onRenegotiationNeeded() {}
+        override fun onRenegotiationNeeded() {
+            // 只有被控端会主动重协商（追加媒体轨），控制端只应答
+            if (!isController) maybeRenegotiate()
+        }
 
         override fun onAddTrack(receiver: RtpReceiver?, mediaStreams: Array<out MediaStream>?) {
-            val track = receiver?.track()
-            if (track is VideoTrack) {
-                main.post { listener?.onRemoteTrack(track) }
+            val track = receiver?.track() ?: return
+            when (track) {
+                is VideoTrack -> {
+                    val streamId = mediaStreams?.firstOrNull()?.getId().orEmpty()
+                    val kind = when {
+                        streamId == "rd-camera" -> "camera"
+                        trackKinds[track.id()] == "camera" -> "camera"
+                        track.id().startsWith("camera") -> "camera"
+                        else -> "screen"
+                    }
+                    if (kind == "camera") {
+                        main.post { listener?.onRemoteCamera(track) }
+                    } else {
+                        main.post { listener?.onRemoteTrack(track) }
+                    }
+                }
+
+                is AudioTrack -> main.post { listener?.onRemoteAudio() }
             }
         }
     }

@@ -112,7 +112,14 @@ func (a *API) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]signaling.DeviceInfo, 0, len(devices))
 	for _, d := range devices {
-		out = append(out, signaling.DeviceInfo{ID: d.ID, Name: d.Name, OS: d.OS, Online: a.hub.IsOnline(d.ID)})
+		out = append(out, signaling.DeviceInfo{
+			ID:            d.ID,
+			Name:          d.Name,
+			OS:            d.OS,
+			Online:        a.hub.IsOnline(d.ID),
+			MicEnabled:    d.MicEnabled,
+			CameraEnabled: d.CameraEnabled,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"devices": out})
 }
@@ -142,7 +149,14 @@ func (a *API) handleSessionLookup(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]signaling.DeviceInfo, 0, len(devices))
 	for _, d := range devices {
-		out = append(out, signaling.DeviceInfo{ID: d.ID, Name: d.Name, OS: d.OS, Online: a.hub.IsOnline(d.ID)})
+		out = append(out, signaling.DeviceInfo{
+			ID:            d.ID,
+			Name:          d.Name,
+			OS:            d.OS,
+			Online:        a.hub.IsOnline(d.ID),
+			MicEnabled:    d.MicEnabled,
+			CameraEnabled: d.CameraEnabled,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"devices": out})
 }
@@ -224,6 +238,7 @@ func (a *API) handleSessionRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	media := a.mediaPolicy(targetID)
 	sess := &store.Session{
 		ID:           uuid.NewString(),
 		ControllerID: claims.DeviceID,
@@ -242,11 +257,12 @@ func (a *API) handleSessionRequest(w http.ResponseWriter, r *http.Request) {
 
 	if autoAccept {
 		// 免同意：直接激活，但被控端仍弹出“正在被控制”提示（可随时取消）
-		turn := a.activateSession(sess)
+		turn := a.activateSession(sess, media)
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"session_id": sess.ID,
 			"status":     "active",
 			"turn":       turn,
+			"media":      media,
 		})
 		return
 	}
@@ -259,14 +275,32 @@ func (a *API) handleSessionRequest(w http.ResponseWriter, r *http.Request) {
 		Data: map[string]interface{}{
 			"controller_name": a.deviceName(claims.DeviceID),
 			"auth_mode":       req.Auth.Mode,
+			"media":           media,
 		},
 	})
-	writeJSON(w, http.StatusOK, map[string]interface{}{"session_id": sess.ID, "status": "pending"})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id": sess.ID,
+		"status":     "pending",
+		"media":      media,
+	})
+}
+
+// mediaPolicy 读取被控设备的媒体权限位。读取失败时按“全部关闭”处理，
+// 宁可少开一路音视频，也不要越权采集。
+func (a *API) mediaPolicy(deviceID string) signaling.MediaPolicy {
+	d, err := a.store.GetDevice(context.Background(), deviceID)
+	if err != nil || d == nil {
+		return signaling.MediaPolicy{}
+	}
+	return signaling.MediaPolicy{Mic: d.MicEnabled, Camera: d.CameraEnabled}
 }
 
 // activateSession 将会话置为 active，并向被控端下发“控制开始”提示与 TURN 凭证。
 // 返回本次会话使用的 TURN 配置，调用方据此回复控制端，保证两端拿到同一份临时凭证。
-func (a *API) activateSession(sess *store.Session) signaling.TurnConfig {
+//
+// media 为被控端当前的媒体权限位，随 control_start 一并下发，
+// 被控端 UI 据此显示“本次允许对方使用麦克风/摄像头”，控制端据此决定是否请求。
+func (a *API) activateSession(sess *store.Session, media signaling.MediaPolicy) signaling.TurnConfig {
 	_ = a.store.UpdateSessionStatus(context.Background(), sess.ID, "active")
 	turn := a.turnConfigForSession(sess.ID)
 	a.hub.Send(sess.TargetID, signaling.Message{
@@ -276,6 +310,7 @@ func (a *API) activateSession(sess *store.Session) signaling.TurnConfig {
 		Data: map[string]interface{}{
 			"controller_name": a.deviceName(sess.ControllerID),
 			"turn":            turn,
+			"media":           media,
 		},
 	})
 	return turn
@@ -320,14 +355,22 @@ func (a *API) handleSessionAccept(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "denied"})
 		return
 	}
-	turn := a.activateSession(sess)
+	media := a.mediaPolicy(sess.TargetID)
+	turn := a.activateSession(sess, media)
 	a.hub.Send(sess.ControllerID, signaling.Message{
 		Type:      signaling.MsgSessionOk,
 		From:      sess.TargetID,
 		SessionID: sess.ID,
-		Data:      map[string]interface{}{"turn": turn},
+		Data: map[string]interface{}{
+			"turn":  turn,
+			"media": media,
+		},
 	})
-	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "active", "turn": turn})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "active",
+		"turn":   turn,
+		"media":  media,
+	})
 }
 
 func (a *API) handleSessionCancel(w http.ResponseWriter, r *http.Request) {

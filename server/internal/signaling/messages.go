@@ -43,10 +43,23 @@ type TurnConfig struct {
 	Credential string   `json:"credential"`
 }
 
+// MediaPolicy 表示被控端开放给本次会话的媒体能力。
+//
+// 语义：Mic / Camera 为 true 表示「被控端允许对方接收本机的麦克风/摄像头」，
+// 控制端据此决定是否发起 media_req；最终是否真的有轨道，由被控端运行时再确认
+// （系统权限未授予、设备被占用时仍可能拿不到设备）。
+type MediaPolicy struct {
+	Mic    bool `json:"mic"`
+	Camera bool `json:"camera"`
+}
+
 // DeviceInfo 为设备列表项。
 type DeviceInfo struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	OS     string `json:"os"`
 	Online bool   `json:"online"`
+	// 设备级媒体权限位，便于控制端在连接前就提示「对方未开放麦克风/摄像头」
+	MicEnabled    bool `json:"mic_enabled"`
+	CameraEnabled bool `json:"camera_enabled"`
 }

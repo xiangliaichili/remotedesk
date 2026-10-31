@@ -20,6 +20,10 @@ import org.json.JSONObject
  *
  * Android 10+ 要求在「mediaProjection 类型的前台服务已经运行」之后才能获取
  * MediaProjection，因此屏幕共享必须由本服务托管，而不能直接放在 Activity 里。
+ *
+ * v1.02 追加：如果本次会话还要用麦克风/摄像头，前台服务类型必须同时声明
+ * `microphone` / `camera`，否则 Android 14 会在后台直接杀掉采集（SecurityException）。
+ * 而这两个类型又要求对应运行时权限已授予，所以这里按「政策位 ∩ 已授权」求交集。
  */
 class RemoteService : Service() {
 
@@ -35,6 +39,7 @@ class RemoteService : Service() {
         const val EXTRA_PEER = "peer_device_id"
         const val EXTRA_NAME = "controller_name"
         const val EXTRA_TURN = "turn"
+        const val EXTRA_POLICY = "media_policy"
 
         private const val CHANNEL_ID = "rd_control"
         private const val NOTIFICATION_ID = 4101
@@ -48,7 +53,8 @@ class RemoteService : Service() {
             sessionId: String,
             peer: String,
             controllerName: String,
-            turn: TurnInfo?
+            turn: TurnInfo?,
+            policy: MediaPolicy
         ) {
             val i = Intent(ctx, RemoteService::class.java).apply {
                 action = ACTION_START
@@ -58,6 +64,10 @@ class RemoteService : Service() {
                 putExtra(EXTRA_PEER, peer)
                 putExtra(EXTRA_NAME, controllerName)
                 putExtra(EXTRA_TURN, turnToJson(turn))
+                putExtra(EXTRA_POLICY, JSONObject().apply {
+                    put("mic", policy.mic)
+                    put("camera", policy.camera)
+                }.toString())
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 ctx.startForegroundService(i)
@@ -81,6 +91,16 @@ class RemoteService : Service() {
                 Api.parseTurn(JSONObject(s))
             } catch (e: Throwable) {
                 null
+            }
+        }
+
+        private fun jsonToPolicy(s: String?): MediaPolicy {
+            if (s.isNullOrBlank()) return MediaPolicy.NONE
+            return try {
+                val o = JSONObject(s)
+                MediaPolicy(o.optBoolean("mic"), o.optBoolean("camera"))
+            } catch (e: Throwable) {
+                MediaPolicy.NONE
             }
         }
     }
@@ -110,20 +130,37 @@ class RemoteService : Service() {
         val peer = intent.getStringExtra(EXTRA_PEER).orEmpty()
         val name = intent.getStringExtra(EXTRA_NAME).orEmpty().ifBlank { "对方设备" }
         val turn = jsonToTurn(intent.getStringExtra(EXTRA_TURN).orEmpty())
+        val policy = jsonToPolicy(intent.getStringExtra(EXTRA_POLICY))
 
-        Log.i(TAG, "begin session=$sessionId peer=$peer controller=$name")
+        Log.i(TAG, "begin session=$sessionId peer=$peer controller=$name media=${policy.mic}/${policy.camera}")
 
         // 必须先进入前台（带 mediaProjection 类型），之后才能拿 MediaProjection
-        val notif = buildNotification(name)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                notif,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notif)
+        val notif = buildNotification(name, policy)
+        val types = foregroundTypes(policy)
+        val started = try {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notif, types)
+            true
+        } catch (e: Throwable) {
+            // Android 14：声明了 microphone/camera 类型但没有对应权限会抛 SecurityException。
+            // 降级为「只共享屏幕」，保证控制本身仍可用。
+            Log.w(TAG, "startForeground with media types failed, fallback to projection only", e)
+            try {
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIFICATION_ID,
+                    notif,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+                true
+            } catch (e2: Throwable) {
+                Log.w(TAG, "startForeground failed", e2)
+                false
+            }
+        }
+        if (!started) {
+            SessionHub.end("无法启动前台服务，本次会话已结束")
+            stopSelf()
+            return
         }
 
         val sig = SessionHub.signaling
@@ -133,8 +170,8 @@ class RemoteService : Service() {
             return
         }
 
-        val client = RtcClient("controlled", sessionId, peer, turn, sig)
-        SessionHub.attach(client, "controlled", sessionId, peer, name)
+        val client = RtcClient("controlled", sessionId, peer, turn, sig, policy)
+        SessionHub.attach(client, "controlled", sessionId, peer, name, policy)
         client.start(this)
 
         @Suppress("DEPRECATION")
@@ -155,6 +192,20 @@ class RemoteService : Service() {
             h = (h * ratio).toInt()
         }
         client.startCapture(data, (w / 2) * 2, (h / 2) * 2, 20)
+    }
+
+    /** 前台服务类型：mediaProjection 必选，麦克风/摄像头按「政策∩已授权」追加。 */
+    private fun foregroundTypes(policy: MediaPolicy): Int {
+        var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (policy.mic && Permissions.micGranted(this)) {
+                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            }
+            if (policy.camera && Permissions.cameraGranted(this)) {
+                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            }
+        }
+        return types
     }
 
     override fun onDestroy() {
@@ -185,7 +236,7 @@ class RemoteService : Service() {
         mgr.createNotificationChannel(ch)
     }
 
-    private fun buildNotification(name: String): Notification {
+    private fun buildNotification(name: String, policy: MediaPolicy): Notification {
         val open = PendingIntent.getActivity(
             this,
             0,
@@ -198,9 +249,18 @@ class RemoteService : Service() {
             Intent(this, RemoteService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val media = buildString {
+            if (policy.mic) append("麦克风")
+            if (policy.camera) append(if (isEmpty()) "摄像头" else " / 摄像头")
+        }
+        val text = if (media.isEmpty()) {
+            "屏幕正在共享，点此返回应用或直接取消控制"
+        } else {
+            "屏幕正在共享，已开放 $media；可随时取消"
+        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("正在被 $name 控制")
-            .setContentText("屏幕正在共享，点此返回应用或直接取消控制")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .setSilent(true)

@@ -12,6 +12,7 @@ import (
 	"github.com/remotedesk/server/internal/config"
 	"github.com/remotedesk/server/internal/relay"
 	"github.com/remotedesk/server/internal/signaling"
+	"github.com/remotedesk/server/internal/sms"
 	"github.com/remotedesk/server/internal/store"
 )
 
@@ -21,11 +22,21 @@ type API struct {
 	hub   *signaling.Hub
 	relay *relay.Server
 	cfg   *config.Config
+	// sms 短信通道（mock / aliyun / off）
+	sms sms.Provider
 }
 
 // New 构造 API 处理器。
 func New(st *store.Store, hub *signaling.Hub, rl *relay.Server, cfg *config.Config) *API {
-	return &API{store: st, hub: hub, relay: rl, cfg: cfg}
+	provider := sms.New(sms.Config{
+		Provider: cfg.SMSProvider,
+		Sign:     cfg.SMSSign,
+		Template: cfg.SMSTemplate,
+		KeyID:    cfg.AliyunKeyID,
+		Secret:   cfg.AliyunSecret,
+		Dev:      cfg.SMSDevMode,
+	})
+	return &API{store: st, hub: hub, relay: rl, cfg: cfg, sms: provider}
 }
 
 // Router 返回完整的 HTTP 路由。
@@ -35,6 +46,13 @@ func (a *API) Router() http.Handler {
 	// 公开接口
 	mux.HandleFunc("/api/register", a.handleRegister)
 	mux.HandleFunc("/api/login", a.handleLogin)
+	mux.HandleFunc("/api/auth/methods", a.handleAuthMethods)
+	mux.HandleFunc("/api/auth/sms/send", a.handleSMSSend)
+	mux.HandleFunc("/api/auth/sms/login", a.handleSMSLogin)
+	mux.HandleFunc("/api/auth/wechat/url", a.handleWechatURL)
+	mux.HandleFunc("/api/auth/wechat/callback", a.handleWechatCallback)
+	mux.HandleFunc("/api/auth/wechat/poll", a.handleWechatPoll)
+	mux.HandleFunc("/api/auth/wechat/dev", a.handleWechatDev)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))

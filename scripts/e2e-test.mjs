@@ -171,6 +171,20 @@ async function main() {
   const sok = await cA.wait('session_ok');
   ok('控制端收到 session_ok + turn', !!sok && !!sok.data.turn, JSON.stringify(sok));
 
+  // 媒体权限位（v1.02）：默认关闭，随会话下发，供控制端决定是否请求音视频
+  ok('会话响应携带 media 权限位（默认关闭）',
+    !!req1.json.media && req1.json.media.mic === false && req1.json.media.camera === false,
+    JSON.stringify(req1.json.media));
+  ok('control_start 携带 media 权限位',
+    !!cstart && !!cstart.data.media && cstart.data.media.mic === false,
+    JSON.stringify(cstart && cstart.data));
+  ok('session_ok 携带与控制端一致的 media 权限位',
+    !!sok && !!sok.data.media && JSON.stringify(sok.data.media) === JSON.stringify(req1.json.media),
+    JSON.stringify(sok && sok.data));
+  ok('设备列表带 mic_enabled / camera_enabled',
+    devsA.json.devices.every((d) => typeof d.mic_enabled === 'boolean' && typeof d.camera_enabled === 'boolean'),
+    JSON.stringify(devsA.json.devices));
+
   console.log('\n[5] SDP / ICE 中继转发');
   cA.send({ type: 'offer', to: 'devB-' + suffix, session_id: sess1, sdp: 'v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n' });
   const offer = await cB.wait('offer');
@@ -274,6 +288,134 @@ async function main() {
   ok('密码过短 → 400', shortPw.status === 400, String(shortPw.status));
   const dup = await post('/api/register', { username: userA, password: pass });
   ok('重复用户名 → 409', dup.status === 409, String(dup.status));
+
+  console.log('\n[11] 媒体权限位随设置下发（语音 / 摄像头）');
+  const setB = await setting(tokenB, { mic_enabled: true, camera_enabled: true });
+  ok('被控端开启麦克风与摄像头权限位', setB.status === 200, String(setB.status));
+  const devsB = await get('/api/devices', tokenB);
+  const selfB = devsB.json.devices.find((d) => d.id === 'devB-' + suffix);
+  ok('设备列表实时反映权限位',
+    !!selfB && selfB.mic_enabled === true && selfB.camera_enabled === true,
+    JSON.stringify(selfB));
+
+  const req5 = await post('/api/session/request', {
+    target_device_id: 'devB-' + suffix,
+    auth: { mode: 'account', username: userB, password: pass },
+  }, tokenA);
+  ok('新的会话请求携带 media={mic:true,camera:true}',
+    req5.status === 200 && !!req5.json.media && req5.json.media.mic === true && req5.json.media.camera === true,
+    JSON.stringify(req5.json));
+  const req5msg = await cB.wait('session_req');
+  ok('session_req 也带上 media 权限位（弹窗可提示将开放音视频）',
+    !!req5msg && !!req5msg.data.media && req5msg.data.media.camera === true,
+    JSON.stringify(req5msg && req5msg.data));
+
+  const acc5 = await post('/api/session/accept', { session_id: req5.json.session_id, accept: true }, tokenB);
+  ok('同意后响应携带 media 权限位',
+    acc5.status === 200 && !!acc5.json.media && acc5.json.media.mic === true, acc5.text);
+  const cstart5 = await cB.wait('control_start');
+  ok('control_start 携带最新 media 权限位',
+    !!cstart5 && !!cstart5.data.media && cstart5.data.media.camera === true,
+    JSON.stringify(cstart5 && cstart5.data));
+  const sok5 = await cA.wait('session_ok');
+  ok('session_ok 与控制端拿到同一份 media',
+    !!sok5 && JSON.stringify(sok5.data.media) === JSON.stringify(acc5.json.media),
+    JSON.stringify(sok5 && sok5.data));
+
+  // 关掉后，同一对设备再次建立的会话应回到全关
+  await setting(tokenB, { mic_enabled: false, camera_enabled: false });
+  const cancel5 = await post('/api/session/cancel', { session_id: req5.json.session_id }, tokenA);
+  ok('结束媒体会话', cancel5.status === 200, cancel5.text);
+  await cB.wait('control_end', 1500);
+
+  const req6 = await post('/api/session/request', {
+    target_device_id: 'devB-' + suffix,
+    auth: { mode: 'account', username: userB, password: pass },
+  }, tokenA);
+  ok('关闭权限位后新会话 media 回到全关',
+    !!req6.json.media && req6.json.media.mic === false && req6.json.media.camera === false,
+    JSON.stringify(req6.json.media));
+  await cB.wait('session_req', 1500);
+  const deny6 = await post('/api/session/accept', { session_id: req6.json.session_id, accept: false }, tokenB);
+  ok('拒绝媒体会话', deny6.status === 200 && deny6.json.status === 'denied', deny6.text);
+  const noStart6 = await cB.wait('control_start', 800);
+  ok('拒绝后不产生 control_start', noStart6 === null, JSON.stringify(noStart6));
+
+  console.log('\n[12] 手机验证码 / 微信扫码登录');
+
+  // 登录方式自述：客户端据此决定显示哪些入口
+  const methods = await get('/api/auth/methods', '');
+  ok('登录方式自述：密码 + 短信 + 微信', methods.status === 200 &&
+    methods.json.password === true && !!methods.json.sms && !!methods.json.wechat,
+    JSON.stringify(methods.json));
+  ok('短信通道处于 dev 模式（响应会回验证码）', methods.json.sms.enabled === true && methods.json.sms.dev === true,
+    JSON.stringify(methods.json.sms));
+
+  const phone = '139' + String(Math.floor(Math.random() * 1e8)).padStart(8, '0');
+  const badPhone = await post('/api/auth/sms/send', { phone: '12345' });
+  ok('手机号格式不合法 → 400', badPhone.status === 400, badPhone.text);
+
+  const sent = await post('/api/auth/sms/send', { phone });
+  ok('发送验证码成功且返回 dev_code', sent.status === 200 && /^\d{6}$/.test(sent.json.dev_code || ''),
+    sent.text);
+  const smsCode = sent.json.dev_code;
+
+  const resend = await post('/api/auth/sms/send', { phone });
+  ok('60 秒内重发 → 429 + Retry-After', resend.status === 429, resend.text);
+
+  const wrong = await post('/api/auth/sms/login', {
+    phone, code: smsCode === '000000' ? '111111' : '000000', device_name: 'SMS-Phone', os: 'android',
+  });
+  ok('验证码错误 → 401 且提示剩余次数', wrong.status === 401 && /还可尝试/.test(wrong.text || ''), wrong.text);
+
+  const smsLogin = await post('/api/auth/sms/login', {
+    phone, code: smsCode, device_name: 'SMS-Phone', os: 'android', device_id: 'sms-dev-' + suffix,
+  });
+  ok('验证码正确 → 自动建号并返回 token', smsLogin.status === 200 && !!smsLogin.json.token &&
+    smsLogin.json.username === phone, smsLogin.text);
+
+  const replay = await post('/api/auth/sms/login', { phone, code: smsCode, device_name: 'SMS-Phone', os: 'android' });
+  ok('验证码一次性，重放 → 400', replay.status === 400, replay.text);
+
+  // 同一手机号再次登录应复用同一个 user_id（幂等建号）
+  const sent2 = await post('/api/auth/sms/send', { phone });
+  const smsLogin2 = await post('/api/auth/sms/login', {
+    phone, code: sent2.json.dev_code, device_name: 'SMS-Phone-2', os: 'android',
+  });
+  ok('同手机号二次登录复用账号', smsLogin2.status === 200 && smsLogin2.json.user_id === smsLogin.json.user_id,
+    JSON.stringify({ first: smsLogin.json.user_id, second: smsLogin2.json.user_id }));
+
+  const smsToken = smsLogin.json.token;
+  const smsDevices = await get('/api/devices', smsToken);
+  ok('短信登录的账号可正常拉设备列表', smsDevices.status === 200, JSON.stringify(smsDevices.json));
+
+  // 微信：用 dev 接口模拟"扫码完成"，不需要真实微信
+  const wurl = await post('/api/auth/wechat/url', { device_name: 'WX-PC', os: 'windows', device_id: 'wx-dev-' + suffix });
+  ok('生成微信授权地址', wurl.status === 200 && !!wurl.json.state &&
+    String(wurl.json.url).includes('snsapi_login'), wurl.text);
+
+  const wxState = wurl.json.state;
+  const wxPending = await post('/api/auth/wechat/poll', { state: wxState });
+  ok('扫码前轮询 → pending', wxPending.status === 200 && wxPending.json.status === 'pending', wxPending.text);
+
+  const simulate = await post('/api/auth/wechat/dev', { state: wxState, openid: 'openid-' + suffix, unionid: 'union-' + suffix });
+  ok('dev 模拟扫码成功', simulate.status === 200 && simulate.json.status === 'ok', simulate.text);
+
+  const wxPoll = await post('/api/auth/wechat/poll', { state: wxState });
+  ok('扫码后轮询 → 拿到 token', wxPoll.status === 200 && !!wxPoll.json.token &&
+    String(wxPoll.json.username || '').startsWith('wx_'), wxPoll.text);
+
+  const wxPoll2 = await post('/api/auth/wechat/poll', { state: wxState });
+  ok('state 一次性，重复轮询 → consumed', wxPoll2.json && wxPoll2.json.status === 'consumed', wxPoll2.text);
+
+  const wxAgain = await post('/api/auth/wechat/url', { device_name: 'WX-PC', os: 'windows' });
+  await post('/api/auth/wechat/dev', { state: wxAgain.json.state, openid: 'openid-' + suffix, unionid: 'union-' + suffix });
+  const wxPoll3 = await post('/api/auth/wechat/poll', { state: wxAgain.json.state });
+  ok('同一微信二次登录复用账号', wxPoll3.status === 200 && wxPoll3.json.user_id === wxPoll.json.user_id,
+    JSON.stringify({ first: wxPoll.json.user_id, third: wxPoll3.json.user_id }));
+
+  const wxBadState = await post('/api/auth/wechat/poll', { state: 'not-exist-' + suffix });
+  ok('未知 state → 404', wxBadState.status === 404, wxBadState.text);
 
   cA.close();
   cB.close();

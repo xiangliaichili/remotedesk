@@ -1,6 +1,8 @@
 mod capture;
 mod files;
 mod input;
+mod media;
+mod open;
 
 pub fn run() {
     tauri::Builder::default()
@@ -16,6 +18,9 @@ pub fn run() {
             capture::start_capture,
             capture::stop_capture,
             input::inject_input,
+            media::media_privacy_status,
+            media::open_privacy_settings,
+            open::open_url,
         ])
         .run(tauri::generate_context!())
         .expect("remotedesk 启动失败");

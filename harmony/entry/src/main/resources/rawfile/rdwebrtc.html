@@ -9,6 +9,13 @@
   #wrap { position: fixed; inset: 0; background: #000; }
   #v { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
   #c { display: none; }
+  /* 对方摄像头：右上角画中画 */
+  #camwrap {
+    position: absolute; right: 10px; top: 10px; width: 30%; max-width: 180px;
+    aspect-ratio: 4 / 3; background: #000; border: 1px solid #2a3440;
+    border-radius: 8px; overflow: hidden; display: none;
+  }
+  #cam { width: 100%; height: 100%; object-fit: cover; }
   #hint {
     position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
     color: #8B97A6; font: 14px/1.6 -apple-system, "HarmonyOS Sans", sans-serif;
@@ -19,6 +26,8 @@
 <body>
 <div id="wrap">
   <video id="v" autoplay playsinline muted></video>
+  <audio id="a" autoplay></audio>
+  <div id="camwrap"><video id="cam" autoplay playsinline muted></video></div>
   <canvas id="c" width="2" height="2"></canvas>
   <div id="hint">正在建立连接…</div>
 </div>
@@ -30,6 +39,9 @@
   var BITRATE = { low: 800000, normal: 2000000, high: 5000000 };
 
   var video = document.getElementById('v');
+  var audio = document.getElementById('a');
+  var camVideo = document.getElementById('cam');
+  var camWrap = document.getElementById('camwrap');
   var canvas = document.getElementById('c');
   var ctx = canvas.getContext('2d', { alpha: false });
   var hint = document.getElementById('hint');
@@ -49,6 +61,14 @@
     dcFile: null,
     pendingCandidates: [],
     closed: false,
+    // 媒体（语音 / 摄像头）
+    policy: { mic: false, camera: false },
+    media: { mic: false, camera: false, micOn: false, camOn: false, reason: '' },
+    desired: { mic: false, camera: false },
+    micStream: null,
+    camStream: null,
+    trackKinds: {},
+    muted: false,
     // 被控端帧渲染
     frameBusy: false,
     frameQueue: 0,
@@ -122,6 +142,26 @@
     };
 
     pc.ontrack = function (ev) {
+      var track = ev.track;
+      var streamId = ev.streams && ev.streams.length ? String(ev.streams[0].id) : '';
+      var kind = streamId === 'rd-camera'
+        ? 'camera'
+        : (S.trackKinds[track.id] || (track.kind === 'audio' ? 'mic' : (String(track.id).indexOf('camera') === 0 ? 'camera' : 'screen')));
+      if (track.kind === 'audio' || kind === 'mic') {
+        // 远端语音走独立 <audio>，否则会被静音的 <video> 吞掉
+        audio.srcObject = ev.streams && ev.streams.length ? ev.streams[0] : new MediaStream([track]);
+        audio.muted = S.muted;
+        audio.play().catch(function () { /* 用户已交互，通常可播 */ });
+        post({ t: 'remote_audio' });
+        return;
+      }
+      if (kind === 'camera') {
+        camVideo.srcObject = ev.streams && ev.streams.length ? ev.streams[0] : new MediaStream([track]);
+        camVideo.play().catch(function () { /* ignore */ });
+        camWrap.style.display = 'block';
+        post({ t: 'remote_camera' });
+        return;
+      }
       var streams = ev.streams;
       if (streams && streams.length) {
         video.srcObject = streams[0];
@@ -147,7 +187,13 @@
     else if (label === 'file') S.dcFile = ch;
 
     ch.onopen = function () {
-      if (label === 'meta') announceScreen();
+      if (label === 'meta') {
+        announceScreen();
+        // 通道就绪前用户已点过「语音/摄像头」→ 补发一次请求
+        if (S.role === 'controller' && (S.desired.mic || S.desired.camera)) {
+          sendMeta({ t: 'media_req', mic: S.desired.mic, camera: S.desired.camera });
+        }
+      }
       post({ t: 'channel', label: label, open: true });
     };
     ch.onclose = function () {
@@ -231,7 +277,135 @@
       return;
     }
     if (msg.t === 'file_progress') return;
+
+    // ---- 语音 / 摄像头（协议 5.5 节）----
+    if (msg.t === 'media_state') {
+      S.media = {
+        mic: msg.mic === true,
+        camera: msg.camera === true,
+        micOn: msg.mic_on === true,
+        camOn: msg.cam_on === true,
+        reason: msg.reason || ''
+      };
+      if (!S.media.camOn) camWrap.style.display = 'none';
+      post({
+        t: 'media_state',
+        mic: S.media.mic,
+        camera: S.media.camera,
+        mic_on: S.media.micOn,
+        cam_on: S.media.camOn,
+        reason: S.media.reason
+      });
+      return;
+    }
+    if (msg.t === 'media_req') {
+      if (S.role === 'controlled') applyMediaRequest(msg);
+      return;
+    }
+    if (msg.t === 'media_track') {
+      S.trackKinds[msg.id] = msg.kind === 'camera' ? 'camera' : 'mic';
+      return;
+    }
     post({ t: 'meta', msg: msg });
+  }
+
+  // ---------------- 语音 / 摄像头 ----------------
+
+  function sendMediaState() {
+    sendMeta({
+      t: 'media_state',
+      mic: S.media.mic,
+      camera: S.media.camera,
+      mic_on: S.media.micOn,
+      cam_on: S.media.camOn,
+      reason: S.media.reason || ''
+    });
+    post({
+      t: 'media_state',
+      mic: S.media.mic,
+      camera: S.media.camera,
+      mic_on: S.media.micOn,
+      cam_on: S.media.camOn,
+      reason: S.media.reason || ''
+    });
+  }
+
+  function applyMediaRequest(msg) {
+    var wantMic = msg.mic === true;
+    var wantCam = msg.camera === true;
+    if (wantMic) openMic(); else closeMic();
+    if (wantCam) openCam(); else closeCam();
+  }
+
+  function openMic() {
+    if (S.role !== 'controlled') return;
+    if (!S.policy.mic) { S.media.micOn = false; S.media.reason = 'policy_off'; sendMediaState(); return; }
+    if (S.micStream) { S.media.micOn = true; S.media.reason = ''; sendMediaState(); return; }
+    navigator.mediaDevices.getUserMedia({ audio: true, video: false }).then(function (stream) {
+      S.micStream = stream;
+      var track = stream.getAudioTracks()[0];
+      if (!track) { throw { name: 'NotFoundError' }; }
+      S.pc.addTrack(track, stream);
+      S.media.micOn = true;
+      S.media.reason = '';
+      sendMeta({ t: 'media_track', kind: 'mic', id: track.id });
+      sendMediaState();
+    }).catch(function (e) {
+      S.media.micOn = false;
+      S.media.reason = mediaErrorReason(e);
+      sendMediaState();
+      post({ t: 'media_problem', kind: 'mic', reason: S.media.reason });
+    });
+  }
+
+  function closeMic() {
+    if (S.micStream) {
+      S.micStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) { /* ignore */ } });
+      S.micStream = null;
+    }
+    S.media.micOn = false;
+    if (S.role === 'controlled') sendMediaState();
+  }
+
+  function openCam() {
+    if (S.role !== 'controlled') return;
+    if (!S.policy.camera) { S.media.camOn = false; S.media.reason = 'policy_off'; sendMediaState(); return; }
+    if (S.camStream) { S.media.camOn = true; S.media.reason = ''; sendMediaState(); return; }
+    navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { width: { ideal: 640 }, height: { ideal: 480 } }
+    }).then(function (stream) {
+      S.camStream = stream;
+      var track = stream.getVideoTracks()[0];
+      if (!track) { throw { name: 'NotFoundError' }; }
+      S.pc.addTrack(track, stream);
+      S.media.camOn = true;
+      S.media.reason = '';
+      sendMeta({ t: 'media_track', kind: 'camera', id: track.id });
+      sendMediaState();
+    }).catch(function (e) {
+      S.media.camOn = false;
+      S.media.reason = mediaErrorReason(e);
+      sendMediaState();
+      post({ t: 'media_problem', kind: 'camera', reason: S.media.reason });
+    });
+  }
+
+  function closeCam() {
+    if (S.camStream) {
+      S.camStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) { /* ignore */ } });
+      S.camStream = null;
+    }
+    S.media.camOn = false;
+    if (S.role === 'controlled') sendMediaState();
+  }
+
+  function mediaErrorReason(e) {
+    var name = (e && e.name) || '';
+    if (name === 'NotAllowedError' || name === 'SecurityError') return 'permission_denied';
+    if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'no_device';
+    if (name === 'NotReadableError' || name === 'AbortError') return 'busy';
+    return 'unsupported';
   }
 
   function onFileBinary(buf) {
@@ -483,6 +657,15 @@
       S.turn = opts.turn || null;
       S.quality = opts.quality || 'normal';
       S.closed = false;
+      // 媒体政策：服务端随会话下发，决定「能不能请求对方的麦克风/摄像头」
+      var media = opts.media || null;
+      S.policy = {
+        mic: !!(media && media.mic === true),
+        camera: !!(media && media.camera === true)
+      };
+      S.media = { mic: S.policy.mic, camera: S.policy.camera, micOn: false, camOn: false, reason: '' };
+      S.desired = { mic: false, camera: false };
+      camWrap.style.display = 'none';
       setHint(S.role === 'controlled' ? '等待对方连接…' : '正在建立连接…');
 
       if (!window.RTCPeerConnection) {
@@ -519,6 +702,39 @@
     setQuality: function (q) {
       S.quality = q;
       applyBitrate();
+    },
+
+    // ---- 语音 / 摄像头 ----
+    /** 控制端：请求 / 停止接收对方的麦克风与摄像头。 */
+    requestMedia: function (mic, camera) {
+      S.desired = { mic: mic === true, camera: camera === true };
+      sendMeta({ t: 'media_req', mic: S.desired.mic, camera: S.desired.camera });
+      post({
+        t: 'media_want',
+        mic: S.desired.mic,
+        camera: S.desired.camera,
+        allowed: S.policy
+      });
+    },
+
+    /** 被控端：本地直接关掉某一路（横幅按钮）。 */
+    stopLocalMedia: function (kind) {
+      if (kind === 'camera') closeCam(); else closeMic();
+    },
+
+    /** 控制端：静音对方声音（纯本地行为，不发协议消息）。 */
+    setAudioMuted: function (muted) {
+      S.muted = muted === true;
+      audio.muted = S.muted;
+    },
+
+    mediaState: function () {
+      return JSON.stringify({
+        policy: S.policy,
+        media: S.media,
+        desired: S.desired,
+        muted: S.muted
+      });
     },
 
     // ---- 发送文件（由原生驱动分块）----
@@ -564,9 +780,15 @@
 
     close: function () {
       S.closed = true;
+      // 放设备：麦克风/摄像头指示灯必须立刻熄灭
+      closeMic();
+      closeCam();
       try { if (S.pc) S.pc.close(); } catch (e) { /* ignore */ }
       S.pc = null;
       video.srcObject = null;
+      audio.srcObject = null;
+      camVideo.srcObject = null;
+      camWrap.style.display = 'none';
       setHint('已结束');
     },
 

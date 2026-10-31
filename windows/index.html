@@ -12,24 +12,63 @@
       <div class="auth-card">
         <h1 class="brand">remotedesk</h1>
         <p class="subtitle">远程桌面 · 简洁连接</p>
+
         <label class="field">
           <span>服务器地址</span>
           <input id="server-url" placeholder="https://rd.example.com" />
         </label>
-        <label class="field">
-          <span>账号</span>
-          <input id="username" autocomplete="username" placeholder="用户名" />
-        </label>
-        <label class="field">
-          <span>密码</span>
-          <input id="password" type="password" autocomplete="current-password" placeholder="密码" />
-        </label>
-        <div class="row-btns">
-          <button id="btn-login" class="btn primary">登录</button>
-          <button id="btn-register" class="btn">注册</button>
+
+        <div class="auth-tabs" role="tablist">
+          <button class="tab active" data-tab="pwd" role="tab">账号密码</button>
+          <button class="tab" data-tab="sms" role="tab">手机验证码</button>
+          <button class="tab" data-tab="wx" role="tab">微信登录</button>
         </div>
+
+        <!-- 账号密码 -->
+        <div id="tab-pwd" class="tab-panel">
+          <label class="field">
+            <span>账号</span>
+            <input id="username" autocomplete="username" placeholder="用户名" />
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="password" type="password" autocomplete="current-password" placeholder="密码" />
+          </label>
+          <div class="row-btns">
+            <button id="btn-login" class="btn primary">登录</button>
+            <button id="btn-register" class="btn">注册</button>
+          </div>
+        </div>
+
+        <!-- 手机验证码 -->
+        <div id="tab-sms" class="tab-panel hidden">
+          <label class="field">
+            <span>手机号</span>
+            <input id="sms-phone" inputmode="numeric" maxlength="11" placeholder="11 位手机号" />
+          </label>
+          <div class="row">
+            <input id="sms-code" inputmode="numeric" maxlength="6" placeholder="6 位验证码" />
+            <button id="btn-sms-send" class="btn small">获取验证码</button>
+          </div>
+          <p class="hint" id="sms-hint">首次登录会自动创建账号</p>
+          <div class="row-btns">
+            <button id="btn-sms-login" class="btn primary">登录 / 注册</button>
+          </div>
+        </div>
+
+        <!-- 微信扫码 -->
+        <div id="tab-wx" class="tab-panel hidden">
+          <p class="hint" id="wx-hint">点下面按钮，在浏览器里用微信扫码，扫完这里会自动登录</p>
+          <div class="row-btns">
+            <button id="btn-wx-start" class="btn primary">打开微信扫码登录</button>
+          </div>
+          <button id="btn-wx-reopen" class="btn small hidden">重新打开授权页</button>
+          <button id="btn-wx-dev" class="btn small hidden">模拟扫码（开发模式）</button>
+        </div>
+
         <p id="auth-error" class="error"></p>
         <p class="hint" id="device-hint"></p>
+        <p class="hint" id="server-hint"></p>
       </div>
     </section>
 
@@ -52,6 +91,11 @@
           </div>
           <ul id="device-list" class="device-list"></ul>
           <p id="devices-empty" class="muted hidden">暂无其他在线设备</p>
+
+          <div id="history-block" class="history hidden">
+            <p class="muted small">最近连接（点一下直接重连）</p>
+            <ul id="history-list" class="history-list"></ul>
+          </div>
         </div>
 
         <div class="panel">
@@ -70,6 +114,24 @@
             <button id="btn-use-link" class="btn">连接</button>
           </div>
         </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>本机语音 / 摄像头</h2>
+            <button id="btn-media-check" class="btn small">重新检测</button>
+          </div>
+          <p class="muted small">
+            被控时是否允许对方听到本机麦克风、看到本机摄像头。这里只是「政策开关」，
+            真正打开设备还需要 Windows 隐私设置允许桌面应用访问。
+          </p>
+          <ul id="media-check" class="check-list">
+            <li><span class="dot offline"></span><span class="check-name">检测中…</span></li>
+          </ul>
+          <div class="row-btns">
+            <button id="btn-open-cam-settings" class="btn small">摄像头设置</button>
+            <button id="btn-open-mic-settings" class="btn small">麦克风设置</button>
+          </div>
+        </div>
       </main>
     </section>
 
@@ -78,7 +140,11 @@
       <div class="remote-toolbar">
         <span class="dot online"></span>
         <span id="remote-title" class="muted">远程控制中</span>
+        <span id="media-state" class="media-state"></span>
         <span class="spacer"></span>
+        <button id="btn-mic" class="btn ghost small media-btn" title="听取对方麦克风">语音</button>
+        <button id="btn-camera" class="btn ghost small media-btn" title="查看对方摄像头">摄像头</button>
+        <button id="btn-audio" class="btn ghost small media-btn" title="静音对方声音">声音开</button>
         <button id="btn-quality" class="btn ghost small">画质：均衡</button>
         <button id="btn-send-file" class="btn ghost small">发送文件</button>
         <button id="btn-fullscreen" class="btn ghost small">全屏</button>
@@ -86,6 +152,11 @@
       </div>
       <div id="remote-stage" class="remote-stage" tabindex="0">
         <video id="remote-video" autoplay playsinline muted></video>
+        <audio id="remote-audio" autoplay></audio>
+        <div id="camera-pip" class="camera-pip hidden">
+          <video id="remote-camera" autoplay playsinline muted></video>
+          <button id="cam-pip-close" class="pip-close" title="关闭摄像头">×</button>
+        </div>
         <div id="remote-overlay" class="overlay"></div>
       </div>
       <div class="transfer-bar hidden" id="transfer-bar">
@@ -99,7 +170,12 @@
     <div id="control-toast" class="toast hidden">
       <div class="toast-body">
         <p id="toast-text">正在被远程控制</p>
-        <button id="toast-cancel" class="btn danger small">取消控制</button>
+        <span id="toast-media" class="muted small"></span>
+        <div class="toast-actions">
+          <button id="toast-mic" class="btn ghost small">关闭麦克风</button>
+          <button id="toast-cam" class="btn ghost small">关闭摄像头</button>
+          <button id="toast-cancel" class="btn danger small">取消控制</button>
+        </div>
       </div>
     </div>
 
@@ -108,9 +184,22 @@
       <div class="modal-card">
         <h3>远程控制请求</h3>
         <p id="req-text" class="muted"></p>
+        <p id="req-media" class="media-note"></p>
         <div class="row-btns">
           <button id="req-deny" class="btn">拒绝</button>
           <button id="req-accept" class="btn primary">同意</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 媒体权限提示弹窗 -->
+    <div id="media-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3 id="media-modal-title">需要系统权限</h3>
+        <p id="media-modal-text" class="muted"></p>
+        <div class="row-btns">
+          <button id="media-modal-close" class="btn">知道了</button>
+          <button id="media-modal-settings" class="btn primary">打开隐私设置</button>
         </div>
       </div>
     </div>

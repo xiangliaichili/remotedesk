@@ -1,20 +1,24 @@
 import { webview } from '@kit.ArkWeb';
-import { common } from '@kit.AbilityKit';
+import { common, Want } from '@kit.AbilityKit';
 import { promptAction } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { Api, ApiError } from '../common/Api';
 import { Signaling, SignalListener } from '../common/Signaling';
 import { Prefs } from '../common/Prefs';
 import { FileReceiver, FileSender, pickOneFile, PickedFile } from '../common/Files';
+import { checkMediaPermissions, deniedHint, ensureMediaPermissions, MediaPermissionResult } from '../common/Permissions';
 import {
+  AuthResult,
   ControlStartData,
   DeviceItem,
   DeviceListResult,
   ErrorData,
+  MediaPolicy,
   SessionOkData,
   SessionReqData,
   SignalMessage,
-  TurnInfo
+  TurnInfo,
+  WechatPollResult
 } from '../common/Types';
 
 /** 暴露给 WebView 的原生对象，JS 侧通过 window.rdNative.postMessage(...) 回调。 */
@@ -51,6 +55,10 @@ interface BridgeMessage {
   text?: string;
   ok?: boolean;
   reason?: string;
+  mic?: boolean;
+  camera?: boolean;
+  mic_on?: boolean;
+  cam_on?: boolean;
 }
 
 @Entry
@@ -69,6 +77,17 @@ struct Index {
   @State serverHint: string = '服务器地址，例如 https://rd.example.com';
   @State currentUser: string = '';
   @State online: boolean = false;
+
+  // ---------- 登录方式（v1.03） ----------
+  @State authTab: string = 'pwd'; // pwd | sms | wx
+  @State smsPhone: string = '';
+  @State smsCode: string = '';
+  @State smsHint: string = '首次登录会自动创建账号';
+  @State smsLeft: number = 0;
+  @State smsEnabled: boolean = true;
+  @State wxHint: string = '点下面按钮，在浏览器里用微信扫码，扫完这里会自动登录';
+  @State wxEnabled: boolean = true;
+  @State wxDev: boolean = false;
 
   // ---------- 设备 ----------
   @State devices: DeviceItem[] = [];
@@ -101,6 +120,16 @@ struct Index {
   @State pickOpen: boolean = false;
   @State pickList: DeviceItem[] = [];
 
+  // ---------- 语音 / 摄像头 ----------
+  @State mediaText: string = '';
+  @State micOn: boolean = false;
+  @State camOn: boolean = false;
+  @State wantMic: boolean = false;
+  @State wantCam: boolean = false;
+  @State audioMuted: boolean = false;
+  @State permMic: boolean = false;
+  @State permCam: boolean = false;
+
   // ---------- 非状态成员 ----------
   private api: Api = new Api('', '');
   private signaling: Signaling | null = null;
@@ -110,6 +139,7 @@ struct Index {
   private sessionId: string = '';
   private peerDeviceId: string = '';
   private turn: TurnInfo = { urls: [], username: '', credential: '' };
+  private peerPolicy: MediaPolicy = { mic: false, camera: false };
   private role: string = 'controller';
   private webReady: boolean = false;
   private initPending: boolean = false;
@@ -119,6 +149,9 @@ struct Index {
   private pickPeerPass: string = '';
   private sender: FileSender = new FileSender();
   private receiver: FileReceiver = new FileReceiver();
+  private wxState: string = '';
+  private wxTimer: number = -1;
+  private smsTimer: number = -1;
 
   // ==================== 生命周期 ====================
 
@@ -132,6 +165,14 @@ struct Index {
       this.onBridge(text);
     };
 
+    // 静默查一次权限状态（不弹窗），设置页里显示"已授权/未授权"
+    checkMediaPermissions(ctx).then((r: MediaPermissionResult) => {
+      this.permMic = r.mic;
+      this.permCam = r.camera;
+    }).catch(() => {
+      // ignore
+    });
+
     const token = Prefs.token();
     if (token.length > 0) {
       this.api = new Api(Prefs.server(), token);
@@ -139,6 +180,9 @@ struct Index {
       this.view = 'home';
       this.connectSignaling();
       this.refreshDevices();
+    } else {
+      // 登录页：问一下服务端支持哪些登录方式
+      this.loadAuthMethods();
     }
   }
 
@@ -149,6 +193,14 @@ struct Index {
     }
     this.sender.close();
     this.receiver.close();
+    if (this.wxTimer >= 0) {
+      clearInterval(this.wxTimer);
+      this.wxTimer = -1;
+    }
+    if (this.smsTimer >= 0) {
+      clearInterval(this.smsTimer);
+      this.smsTimer = -1;
+    }
   }
 
   // ==================== 账号 ====================
@@ -180,19 +232,205 @@ struct Index {
       const r = register
         ? await this.api.register(this.userInput.trim(), this.passInput, devName, devId)
         : await this.api.login(this.userInput.trim(), this.passInput, devName, devId);
-      Prefs.setAuth(r.token, r.username);
-      Prefs.setServer(this.serverInput);
-      this.api.token = r.token;
-      this.currentUser = r.username;
-      this.passInput = '';
-      this.view = 'home';
-      this.connectSignaling();
-      this.refreshDevices();
+      this.afterAuth(r);
     } catch (e) {
       const msg = e instanceof ApiError ? (e as ApiError).message : '网络异常，请检查服务器地址';
       this.errText = msg;
     } finally {
       this.busy = false;
+    }
+  }
+
+  /** 三种登录方式共用的收尾。 */
+  private afterAuth(r: AuthResult): void {
+    Prefs.setAuth(r.token, r.username);
+    Prefs.setServer(this.serverInput);
+    this.api.token = r.token;
+    this.api.setServer(this.serverInput);
+    this.currentUser = r.username;
+    this.passInput = '';
+    this.smsCode = '';
+    this.view = 'home';
+    this.connectSignaling();
+    this.refreshDevices();
+  }
+
+  // ==================== 登录方式（v1.03） ====================
+
+  private switchAuthTab(kind: string): void {
+    this.authTab = kind;
+    this.errText = '';
+  }
+
+  /** 服务端支持哪些登录方式，未配置的入口隐藏。 */
+  private async loadAuthMethods(): Promise<void> {
+    const probe = new Api(this.serverInput.length > 0 ? this.serverInput : Prefs.server(), '');
+    try {
+      const m = await probe.authMethods();
+      this.smsEnabled = m.smsEnabled;
+      this.wxEnabled = m.wechatEnabled;
+      this.wxDev = m.wechatDev;
+      if (!m.smsEnabled) {
+        this.smsHint = '服务端未开启短信登录';
+      } else if (m.smsDev) {
+        this.smsHint = '开发模式：验证码会自动填入';
+      }
+      if (!m.wechatEnabled) {
+        this.wxHint = '服务端未配置微信登录（RD_WECHAT_APP_ID / SECRET）';
+      }
+    } catch (e) {
+      // 服务器地址还没填对，保持默认
+    }
+  }
+
+  private async sendSms(): Promise<void> {
+    this.errText = '';
+    const phone = this.smsPhone.trim();
+    if (!new RegExp('^1[3-9]\\d{9}$').test(phone)) {
+      this.errText = '请输入 11 位手机号';
+      return;
+    }
+    if (this.smsLeft > 0) {
+      return;
+    }
+    const api = new Api(this.serverInput, '');
+    try {
+      const devCode = await api.sendSmsCode(phone);
+      if (devCode.length > 0) {
+        this.smsCode = devCode;
+        this.smsHint = '开发模式：验证码已自动填入（' + devCode + '）';
+      } else {
+        this.smsHint = '验证码已发送，5 分钟内有效';
+      }
+      this.startSmsCountdown(60);
+    } catch (e) {
+      const msg = e instanceof ApiError ? (e as ApiError).message : '发送失败';
+      this.errText = msg;
+    }
+  }
+
+  private startSmsCountdown(seconds: number): void {
+    if (this.smsTimer >= 0) {
+      clearInterval(this.smsTimer);
+    }
+    this.smsLeft = seconds;
+    this.smsTimer = setInterval(() => {
+      this.smsLeft = this.smsLeft - 1;
+      if (this.smsLeft <= 0) {
+        clearInterval(this.smsTimer);
+        this.smsTimer = -1;
+        this.smsLeft = 0;
+      }
+    }, 1000);
+  }
+
+  private async smsLogin(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    this.errText = '';
+    const phone = this.smsPhone.trim();
+    const code = this.smsCode.trim();
+    if (phone.length !== 11) {
+      this.errText = '请输入 11 位手机号';
+      return;
+    }
+    if (code.length !== 6) {
+      this.errText = '请输入 6 位验证码';
+      return;
+    }
+    this.busy = true;
+    const api = new Api(this.serverInput, '');
+    try {
+      const r = await api.smsLogin(phone, code, Prefs.deviceName(), Prefs.deviceId());
+      this.afterAuth(r);
+    } catch (e) {
+      const msg = e instanceof ApiError ? (e as ApiError).message : '登录失败';
+      this.errText = msg;
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** 微信扫码：打开浏览器授权 + 轮询结果。 */
+  private async wxStart(): Promise<void> {
+    this.errText = '';
+    const api = new Api(this.serverInput, '');
+    try {
+      const session = await api.wechatAuthUrl(Prefs.deviceName(), Prefs.deviceId());
+      this.wxState = session.state;
+      this.wxHint = '已打开授权页，扫码后会自动登录…';
+      const ctx = getContext(this) as common.UIAbilityContext;
+      const want: Want = {
+        action: 'ohos.want.action.viewData',
+        uri: session.url
+      };
+      ctx.startAbility(want).catch(() => {
+        this.wxHint = '无法打开浏览器，请手动访问：' + session.url;
+      });
+      this.pollWechat(session.state);
+    } catch (e) {
+      const msg = e instanceof ApiError ? (e as ApiError).message : '发起微信登录失败';
+      this.errText = msg;
+    }
+  }
+
+  private pollWechat(state: string): void {
+    if (this.wxTimer >= 0) {
+      clearInterval(this.wxTimer);
+    }
+    let waited = 0;
+    const api = new Api(this.serverInput, '');
+    this.wxTimer = setInterval(() => {
+      waited += 2;
+      if (waited > 600 || this.wxState !== state) {
+        clearInterval(this.wxTimer);
+        this.wxTimer = -1;
+        return;
+      }
+      api.wechatPoll(state).then((r: WechatPollResult) => {
+        if (r.status === 'ok') {
+          clearInterval(this.wxTimer);
+          this.wxTimer = -1;
+          this.wxState = '';
+          const res: AuthResult = {
+            token: r.token,
+            user_id: r.userId,
+            device_id: r.deviceId.length > 0 ? r.deviceId : Prefs.deviceId(),
+            username: r.username
+          };
+          this.afterAuth(res);
+        } else if (r.status === 'error') {
+          clearInterval(this.wxTimer);
+          this.wxTimer = -1;
+          this.wxState = '';
+          this.wxHint = '登录失败：' + (r.message.length > 0 ? r.message : '授权被拒绝');
+        } else if (r.status === 'expired' || r.status === 'consumed') {
+          clearInterval(this.wxTimer);
+          this.wxTimer = -1;
+          this.wxState = '';
+          this.wxHint = '二维码已失效，请重新发起';
+        } else {
+          this.wxHint = '等待扫码…（' + waited + 's）';
+        }
+      }).catch(() => {
+        // 网络抖动继续轮询
+      });
+    }, 2000);
+  }
+
+  private async wxDevSimulate(): Promise<void> {
+    if (this.wxState.length === 0) {
+      this.errText = '请先点「打开微信扫码登录」';
+      return;
+    }
+    const api = new Api(this.serverInput, '');
+    try {
+      await api.wechatDevSimulate(this.wxState, 'dev-openid-' + Prefs.deviceId().substring(0, 8));
+      this.wxHint = '已模拟扫码，正在登录…';
+    } catch (e) {
+      const msg = e instanceof ApiError ? (e as ApiError).message : '模拟失败';
+      this.errText = msg;
     }
   }
 
@@ -264,7 +502,13 @@ struct Index {
     if (type === 'session_ok') {
       const d = msg.data as SessionOkData;
       const t = d !== undefined && d.turn !== undefined ? d.turn : Api.turnFrom(undefined);
-      this.beginController(msg.from !== undefined ? msg.from : '', msg.session_id !== undefined ? msg.session_id : '', t, '远程控制');
+      this.beginController(
+        msg.from !== undefined ? msg.from : '',
+        msg.session_id !== undefined ? msg.session_id : '',
+        t,
+        '远程控制',
+        d !== undefined ? d.media : undefined
+      );
       return;
     }
     if (type === 'session_deny') {
@@ -430,7 +674,7 @@ struct Index {
       this.busy = false;
       if (r.status === 'active') {
         const t = r.turn !== undefined ? r.turn : Api.turnFrom(undefined);
-        this.beginController('', r.session_id, t, title);
+        this.beginController('', r.session_id, t, title, r.media);
       } else {
         this.toast('已发送请求，等待对方同意…');
       }
@@ -455,7 +699,7 @@ struct Index {
 
   // ==================== 远程会话 ====================
 
-  private beginController(peer: string, sessionId: string, turn: TurnInfo, title: string): void {
+  private beginController(peer: string, sessionId: string, turn: TurnInfo, title: string, media?: MediaPolicy): void {
     this.role = 'controller';
     this.peerDeviceId = peer;
     this.sessionId = sessionId;
@@ -466,6 +710,14 @@ struct Index {
     this.txPct = 0;
     this.webReady = false;
     this.initPending = true;
+    this.wantMic = false;
+    this.wantCam = false;
+    this.micOn = false;
+    this.camOn = false;
+    this.mediaText = '';
+    this.peerPolicy = media !== undefined
+      ? { mic: media.mic, camera: media.camera }
+      : { mic: false, camera: false };
     this.view = 'remote';
   }
 
@@ -480,7 +732,8 @@ struct Index {
       'sessionId': this.sessionId,
       'peer': this.peerDeviceId,
       'turn': this.turn,
-      'quality': this.quality
+      'quality': this.quality,
+      'media': this.peerPolicy
     };
     this.runJs('window.RD && window.RD.init(' + JSON.stringify(opts) + ');');
   }
@@ -511,6 +764,12 @@ struct Index {
     this.peerDeviceId = '';
     this.webReady = false;
     this.txVisible = false;
+    this.mediaText = '';
+    this.wantMic = false;
+    this.wantCam = false;
+    this.micOn = false;
+    this.camOn = false;
+    this.peerPolicy = { mic: false, camera: false };
     this.view = 'home';
     if (remote) {
       this.toast('对方已结束控制');
@@ -547,6 +806,33 @@ struct Index {
     }
     this.textInput = '';
     this.textOpen = false;
+  }
+
+  /** 控制端：开/关对方的麦克风或摄像头。 */
+  private toggleMedia(kind: string): void {
+    if (this.role !== 'controller' || !this.webReady) {
+      return;
+    }
+    const allowed = kind === 'mic' ? this.peerPolicy.mic : this.peerPolicy.camera;
+    const what = kind === 'mic' ? '麦克风' : '摄像头';
+    if (!allowed) {
+      this.toast('对方未开放' + what + '权限，请对方在设置里打开后重连');
+      return;
+    }
+    if (kind === 'mic') {
+      this.wantMic = !this.wantMic;
+    } else {
+      this.wantCam = !this.wantCam;
+    }
+    const mic = this.wantMic ? 'true' : 'false';
+    const cam = this.wantCam ? 'true' : 'false';
+    this.runJs('window.RD && window.RD.requestMedia(' + mic + ',' + cam + ');');
+  }
+
+  /** 控制端：静音对方声音（纯本地）。 */
+  private toggleAudio(): void {
+    this.audioMuted = !this.audioMuted;
+    this.runJs('window.RD && window.RD.setAudioMuted(' + (this.audioMuted ? 'true' : 'false') + ');');
   }
 
   private async sendFile(): Promise<void> {
@@ -680,6 +966,57 @@ struct Index {
 
     if (t === 'remote_track') {
       this.remoteState = '';
+      return;
+    }
+
+    // ---- 语音 / 摄像头 ----
+    if (t === 'media_state') {
+      this.micOn = m.mic_on === true;
+      this.camOn = m.cam_on === true;
+      const fmt = (allowed: boolean, on: boolean, label: string): string => {
+        if (on) {
+          return label + ' 已开';
+        }
+        return allowed ? label + ' 未开' : label + ' 已关权限';
+      };
+      let tail = '';
+      const reason = m.reason !== undefined ? m.reason : '';
+      if (reason === 'policy_off') {
+        tail = ' · 被控端已关闭该权限';
+      } else if (reason === 'permission_denied') {
+        tail = ' · 系统权限未授予';
+      } else if (reason === 'no_device') {
+        tail = ' · 没有可用设备';
+      } else if (reason === 'busy') {
+        tail = ' · 设备被占用';
+      }
+      this.mediaText = fmt(m.mic === true, this.micOn, '麦克风') + ' · ' +
+        fmt(m.camera === true, this.camOn, '摄像头') + tail;
+      return;
+    }
+
+    if (t === 'media_want') {
+      this.wantMic = m.mic === true;
+      this.wantCam = m.camera === true;
+      return;
+    }
+
+    if (t === 'media_problem') {
+      const kind = m.kind !== undefined ? m.kind : 'mic';
+      const reason = m.reason !== undefined ? m.reason : '';
+      const what = kind === 'mic' ? '麦克风' : '摄像头';
+      let msg = what + ' 打开失败（' + reason + '）';
+      if (reason === 'permission_denied') {
+        msg = '系统未允许使用' + what + '，请在「设置 → 应用 → 权限」中开启后重试';
+      } else if (reason === 'no_device') {
+        msg = '没有可用的' + what;
+      } else if (reason === 'busy') {
+        msg = what + '正被其它应用占用，请关闭后重试';
+      } else if (reason === 'policy_off') {
+        msg = '本机设置里已关闭' + what + '，本次不会采集';
+      }
+      this.toast(msg);
+      return;
     }
   }
 
@@ -700,6 +1037,17 @@ struct Index {
   private async saveSettings(): Promise<void> {
     try {
       await this.api.putSettings(this.setAuto, this.setMic, this.setCam);
+      // 打开开关时顺便申请运行时权限，避免真正被控时才手忙脚乱
+      if (this.setMic || this.setCam) {
+        const ctx = getContext(this) as common.UIAbilityContext;
+        const r = await ensureMediaPermissions(ctx, this.setMic, this.setCam);
+        this.permMic = r.mic;
+        this.permCam = r.camera;
+        const hint = deniedHint(r, this.setMic, this.setCam);
+        if (hint.length > 0) {
+          this.toast(hint);
+        }
+      }
       this.settingsOpen = false;
       this.toast('设置已保存');
     } catch (e) {
@@ -784,13 +1132,103 @@ struct Index {
             this.serverInput = v;
           }, InputType.URL)
 
-          this.fieldCard('账号', this.userInput, '至少 3 位', (v: string) => {
-            this.userInput = v;
-          }, InputType.Normal)
+          // 登录方式切换
+          Row({ space: 6 }) {
+            Button('账号密码')
+              .layoutWeight(1)
+              .height(38)
+              .fontSize(13)
+              .fontColor(this.authTab === 'pwd' ? Color.White : $r('app.color.muted'))
+              .backgroundColor(this.authTab === 'pwd' ? $r('app.color.accent2') : $r('app.color.panel2'))
+              .borderRadius(10)
+              .onClick(() => {
+                this.switchAuthTab('pwd');
+              })
+            if (this.smsEnabled) {
+              Button('手机验证码')
+                .layoutWeight(1)
+                .height(38)
+                .fontSize(13)
+                .fontColor(this.authTab === 'sms' ? Color.White : $r('app.color.muted'))
+                .backgroundColor(this.authTab === 'sms' ? $r('app.color.accent2') : $r('app.color.panel2'))
+                .borderRadius(10)
+                .onClick(() => {
+                  this.switchAuthTab('sms');
+                })
+            }
+            if (this.wxEnabled) {
+              Button('微信登录')
+                .layoutWeight(1)
+                .height(38)
+                .fontSize(13)
+                .fontColor(this.authTab === 'wx' ? Color.White : $r('app.color.muted'))
+                .backgroundColor(this.authTab === 'wx' ? $r('app.color.accent2') : $r('app.color.panel2'))
+                .borderRadius(10)
+                .onClick(() => {
+                  this.switchAuthTab('wx');
+                })
+            }
+          }
+          .width('100%')
 
-          this.fieldCard('密码', this.passInput, '至少 6 位', (v: string) => {
-            this.passInput = v;
-          }, InputType.Password)
+          if (this.authTab === 'pwd') {
+            this.fieldCard('账号', this.userInput, '至少 3 位', (v: string) => {
+              this.userInput = v;
+            }, InputType.Normal)
+
+            this.fieldCard('密码', this.passInput, '至少 6 位', (v: string) => {
+              this.passInput = v;
+            }, InputType.Password)
+          }
+
+          if (this.authTab === 'sms') {
+            this.fieldCard('手机号', this.smsPhone, '11 位手机号', (v: string) => {
+              this.smsPhone = v;
+            }, InputType.PhoneNumber)
+
+            Row({ space: 8 }) {
+              TextInput({ text: this.smsCode, placeholder: '6 位验证码' })
+                .type(InputType.Number)
+                .maxLength(6)
+                .height(46)
+                .fontSize(15)
+                .fontColor($r('app.color.fg'))
+                .placeholderColor($r('app.color.muted'))
+                .backgroundColor($r('app.color.panel2'))
+                .borderRadius(12)
+                .layoutWeight(1)
+                .onChange((v: string) => {
+                  this.smsCode = v;
+                })
+              Button(this.smsLeft > 0 ? (this.smsLeft + 's') : '获取验证码')
+                .height(46)
+                .fontSize(13)
+                .fontColor(Color.White)
+                .backgroundColor($r('app.color.accent2'))
+                .borderRadius(12)
+                .enabled(this.smsLeft === 0)
+                .onClick(() => {
+                  this.sendSms();
+                })
+            }
+            .width('100%')
+
+            Text(this.smsHint).fontSize(11).fontColor($r('app.color.muted')).width('100%')
+          }
+
+          if (this.authTab === 'wx') {
+            Text(this.wxHint).fontSize(12).fontColor($r('app.color.muted')).width('100%')
+
+            this.primaryButton('打开微信扫码登录', () => {
+              this.wxStart();
+            })
+
+            if (this.wxDev) {
+              this.ghostButton('模拟扫码（开发模式）', () => {
+                this.wxDevSimulate();
+              })
+            }
+          }
 
           this.fieldCard('本机名称', this.deviceNameInput, '例如 我的手机', (v: string) => {
             this.deviceNameInput = v;
@@ -800,13 +1238,19 @@ struct Index {
             Text(this.errText).fontSize(13).fontColor($r('app.color.danger')).width('100%')
           }
 
-          this.primaryButton(this.busy ? '请稍候…' : '登录', () => {
-            this.doAuth(false);
-          })
+          if (this.authTab === 'pwd') {
+            this.primaryButton(this.busy ? '请稍候…' : '登录', () => {
+              this.doAuth(false);
+            })
 
-          this.ghostButton('注册并登录', () => {
-            this.doAuth(true);
-          })
+            this.ghostButton('注册并登录', () => {
+              this.doAuth(true);
+            })
+          } else if (this.authTab === 'sms') {
+            this.primaryButton(this.busy ? '请稍候…' : '登录 / 注册', () => {
+              this.smsLogin();
+            })
+          }
         }
         .width('100%')
         .padding({ left: 20, right: 20, bottom: 40 })
@@ -1066,6 +1510,48 @@ struct Index {
       .padding({ left: 12, right: 12, top: 10, bottom: 10 })
       .backgroundColor($r('app.color.panel'))
 
+      // 语音 / 摄像头工具条
+      Row({ space: 8 }) {
+        Button(this.wantMic ? '语音·开' : '语音')
+          .height(30)
+          .fontSize(12)
+          .fontColor(this.wantMic ? Color.White : $r('app.color.fg'))
+          .backgroundColor(this.wantMic ? $r('app.color.accent2') : $r('app.color.panel2'))
+          .borderRadius(9)
+          .enabled(this.peerPolicy.mic)
+          .onClick(() => {
+            this.toggleMedia('mic');
+          })
+        Button(this.wantCam ? '摄像头·开' : '摄像头')
+          .height(30)
+          .fontSize(12)
+          .fontColor(this.wantCam ? Color.White : $r('app.color.fg'))
+          .backgroundColor(this.wantCam ? $r('app.color.accent2') : $r('app.color.panel2'))
+          .borderRadius(9)
+          .enabled(this.peerPolicy.camera)
+          .onClick(() => {
+            this.toggleMedia('camera');
+          })
+        Button(this.audioMuted ? '声音关' : '声音开')
+          .height(30)
+          .fontSize(12)
+          .fontColor($r('app.color.fg'))
+          .backgroundColor($r('app.color.panel2'))
+          .borderRadius(9)
+          .onClick(() => {
+            this.toggleAudio();
+          })
+        Text(this.mediaText.length > 0 ? this.mediaText : '（对方未开放音视频时会显示原因）')
+          .fontSize(10)
+          .fontColor($r('app.color.muted'))
+          .layoutWeight(1)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+      .backgroundColor($r('app.color.panel2'))
+
       Stack({ alignContent: Alignment.Center }) {
         Web({ src: $rawfile('rdwebrtc.html'), controller: this.controller })
           .javaScriptAccess(true)
@@ -1082,6 +1568,29 @@ struct Index {
             this.webReady = true;
             if (this.initPending) {
               this.initWebRtc();
+            }
+          })
+          // ArkWeb 的媒体授权：getUserMedia 会先问这里，不放行则直接失败
+          .onPermissionRequest((event) => {
+            const request = event.request;
+            const resources = request.getAccessibleResource();
+            const allow: Array<webview.ProtectedResourceType> = [];
+            for (let i = 0; i < resources.length; i++) {
+              const r = resources[i];
+              if (r === webview.ProtectedResourceType.AUDIO_CAPTURE) {
+                if (this.setMic) {
+                  allow.push(r);
+                }
+              } else if (r === webview.ProtectedResourceType.VIDEO_CAPTURE) {
+                if (this.setCam) {
+                  allow.push(r);
+                }
+              }
+            }
+            if (allow.length > 0) {
+              request.grant(allow);
+            } else {
+              request.deny();
             }
           })
           .width('100%')
@@ -1165,6 +1674,11 @@ struct Index {
           })
       }
       .width('100%')
+
+      Text('系统权限：麦克风' + (this.permMic ? '已授权' : '未授权') + ' · 摄像头' + (this.permCam ? '已授权' : '未授权'))
+        .fontSize(11)
+        .fontColor(this.permMic && this.permCam ? $r('app.color.muted') : $r('app.color.danger'))
+        .width('100%')
 
       Row({ space: 10 }) {
         Button('取消')

@@ -1,7 +1,8 @@
 # remotedesk 服务器构建
 
 BIN=remotedesk
-LDFLAGS=-s -w
+VERSION=1.3.0
+LDFLAGS=-s -w -X main.version=$(VERSION)
 
 .PHONY: all tidy build run test linux-amd64 linux-arm64 windows-amd64 macos-arm64 clean
 
