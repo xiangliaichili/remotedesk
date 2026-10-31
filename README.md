@@ -455,8 +455,8 @@ powershell -ExecutionPolicy Bypass -File ..\scripts\build-windows.ps1
 | 文件 | 说明 |
 | --- | --- |
 | `src-tauri\target\release\remotedesk.exe` | 免安装单文件，双击即用 |
-| `...\bundle\nsis\RemoteDesk_1.3.0_x64-setup.exe` | NSIS 安装包（当前用户级，免管理员） |
-| `...\bundle\msi\RemoteDesk_1.3.0_x64_en-US.msi` | MSI 安装包 |
+| `...\bundle\nsis\remotedesk_1.3.0_x64-setup.exe` | NSIS 安装包（当前用户级，免管理员） |
+| `...\bundle\msi\remotedesk_1.3.0_x64_en-US.msi` | MSI 安装包 |
 
 体积约 10~15 MB（WebView2 用系统共享运行时，不重复打包）。
 
@@ -667,7 +667,8 @@ dist/
 ├─ README.md               发布包说明（怎么跑、版本、校验）
 ├─ VERSION                 产物版本 / 源码版本 / 打包时间
 ├─ SHA256SUMS.txt          相对路径校验和（cd dist 后 sha256sum -c 即可）
-├─ windows/remotedesk-<版本>-windows-x64.exe
+├─ windows/remotedesk-<版本>-windows-x64-setup.exe   NSIS 安装向导
+├─ windows/remotedesk-<版本>-windows-x64.msi         MSI 安装包（企业/静默部署）
 ├─ android/remotedesk-<版本>-debug.apk
 └─ server/remotedesk-server-{linux-amd64,linux-arm64,darwin-arm64,windows-amd64.exe}
    server/.env.example

@@ -56,25 +56,51 @@ $copied = @()
 $missing = @()
 
 # ---------- Windows ----------
+# dist 里只放**安装包**（双击出安装向导），不放裸 exe：
+#   - NSIS setup.exe：普通用户双击安装（开始菜单 + 卸载器）
+#   - MSI：企业/批量部署用
+# 裸 exe（便携版）只在 target\release\remotedesk.exe，不进 dist。
 Step "整理 Windows 产物"
-$winSrc = Join-Path $root "windows\src-tauri\target\release\remotedesk.exe"
-$winDst = Join-Path $dist "windows\remotedesk-$Version-windows-x64.exe"
-if (Test-Path $winSrc) {
-    $exeTime = (Get-Item $winSrc).LastWriteTime
+$bundleDir = Join-Path $root "windows\src-tauri\target\release\bundle"
+$nsisExe = Get-ChildItem (Join-Path $bundleDir "nsis") -Filter "*-setup.exe" -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$msiFile = Get-ChildItem (Join-Path $bundleDir "msi") -Filter "*.msi" -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+if (-not $nsisExe -and -not $msiFile) {
+    $missing += "windows/src-tauri/target/release/bundle/nsis/*-setup.exe"
+    Warn "未找到 Windows 安装包（先跑 scripts\build-windows.ps1，注意不要加 -SkipBundle）"
+} else {
+    $refFile = if ($nsisExe) { $nsisExe } else { $msiFile }
+    $exeTime = $refFile.LastWriteTime
     $newer = Get-ChildItem (Join-Path $root "windows\src"), (Join-Path $root "windows\src-tauri\src") -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -gt $exeTime } | Select-Object -First 3
     if ($newer -and -not $Force) {
-        Warn "remotedesk.exe 早于这些源码改动，可能不是最新构建："
+        Warn "安装包早于这些源码改动，可能不是最新构建："
         $newer | ForEach-Object { Write-Host "        $($_.FullName)" -ForegroundColor DarkYellow }
         Warn "先执行 scripts\build-windows.ps1，或加 -Force 强制打包"
     }
-    Copy-Item $winSrc $winDst -Force
+}
+
+if ($nsisExe) {
+    $winDst = Join-Path $dist "windows\remotedesk-$Version-windows-x64-setup.exe"
+    Copy-Item $nsisExe.FullName $winDst -Force
     $copied += $winDst
     Good ("windows/{0}  ({1} MB)" -f (Split-Path $winDst -Leaf), [math]::Round((Get-Item $winDst).Length / 1MB, 1))
-} else {
-    $missing += "windows/src-tauri/target/release/remotedesk.exe"
-    Warn "未找到 Windows 产物（先跑 scripts\build-windows.ps1）"
 }
+if ($msiFile) {
+    $winDst = Join-Path $dist "windows\remotedesk-$Version-windows-x64.msi"
+    Copy-Item $msiFile.FullName $winDst -Force
+    $copied += $winDst
+    Good ("windows/{0}  ({1} MB)" -f (Split-Path $winDst -Leaf), [math]::Round((Get-Item $winDst).Length / 1MB, 1))
+}
+
+# 清理旧版打包方式遗留的裸 exe（点开直接跑、不安装的那个）
+Get-ChildItem (Join-Path $dist "windows") -Filter "remotedesk-*-windows-x64.exe" -File -ErrorAction SilentlyContinue |
+    ForEach-Object {
+        Remove-Item $_.FullName -Force
+        Info "已移除旧便携版 $($_.Name)（改为发布安装包）"
+    }
 
 # ---------- Android ----------
 Step "整理 Android 产物"
@@ -135,7 +161,7 @@ $verText = @(
     "# SOURCE_VERSION：打包时源码树的版本（windows/package.json）",
     "# 三者不一致说明源码已更新但未重新构建，请先构建再打包。"
 ) -join "`n"
-[System.IO.File]::WriteAllText((Join-Path $dist "VERSION"), $verText + "`n", (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $dist "VERSION"), $verText + "`n", (New-Object System.Text.UTF8Encoding($true)))
 Good "dist/VERSION"
 
 # ---------- 校验和 ----------
