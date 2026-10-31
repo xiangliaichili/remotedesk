@@ -121,8 +121,12 @@ if ((Test-Path $envPath) -and -not $Force) {
     Good "已写入 server/.env"
 }
 
-# 把 .env 读进当前进程
-foreach ($line in Get-Content $envPath) {
+# 把 .env 读进当前进程。
+# 必须显式写 -Encoding UTF8：PS 5.1 的 Get-Content 默认按 ANSI（中文机上是 GBK）读，
+# 无 BOM 的 UTF-8 里的中文会被读坏（"文档" -> "鏂囨。"）。这些值随后会被子进程继承，
+# 而服务端的优先级是「环境变量 > .env 文件」，于是坏值会盖掉文件里正确的那个，
+# 表现为 create data dir: mkdir D:/<乱码>: Access is denied。
+foreach ($line in Get-Content $envPath -Encoding UTF8) {
     if ($line -match '^\s*#' -or $line -notmatch '=') { continue }
     $kv = $line -split '=', 2
     Set-Item -Path ("Env:" + $kv[0].Trim()) -Value $kv[1].Trim()
@@ -195,7 +199,9 @@ if (-not $ready) {
         Bad "常见原因：端口 $Port 被占用、.env 里 RD_LISTEN 写错、防火墙/杀软拦截"
     } else {
         Bad "服务器没起来，日志："
-        Get-Content $outLog, $errLog -ErrorAction SilentlyContinue | Select-Object -Last 20 | ForEach-Object { "      $_" }
+        # -Encoding UTF8：Go 写的是 UTF-8，按默认的 ANSI 读会变成乱码
+        Get-Content $outLog, $errLog -Encoding UTF8 -ErrorAction SilentlyContinue |
+            Select-Object -Last 20 | ForEach-Object { "      $_" }
     }
     Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
     exit 1

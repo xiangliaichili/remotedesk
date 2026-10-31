@@ -1536,6 +1536,26 @@ Go 默认把模块缓存放 `~/go`、构建缓存放 `%LOCALAPPDATA%`，受限�
 脚本已改指到仓库内的 `.tools\gopath` / `.tools\gocache`（`Set-GoEnv`），
 Rust 同理改到 `.tools\rustup` / `.tools\cargo`（`Set-RustEnv`）。
 
+**`create data dir: mkdir D:/<一堆乱码>: Access is denied`？**（项目路径含中文时）
+
+这是 **PowerShell 5.1 的编码坑**，链条是这样的：
+
+1. `server/.env` 里存的是正确的 UTF-8 路径 `D:/文档/GitHub/...`
+2. `Get-Content` 不带 `-Encoding` 时按 **ANSI（中文机上是 GBK）** 读，中文被读成乱码
+3. 这个坏值被写进进程环境变量，又被子进程的服务器继承；服务端优先级是
+   **环境变量 > .env 文件**，于是坏值盖掉了文件里正确的那个
+4. 路径不存在 → Go 的 `MkdirAll` 一路向上递归 → 最后想在 **盘符根目录**建目录 → 被拒
+
+脚本里读 `.env` 的地方已经显式写了 `-Encoding UTF8`。如果你在別处（自己的脚本、
+其他工具）要读 `.env` 或 Go 写的日志，记得同样指定 UTF-8：
+
+```powershell
+Get-Content server\.env -Encoding UTF8          # 别省略 -Encoding
+```
+
+> 顺带一提：日志里出现乱码也常常是同一类问题——Go 写的是 UTF-8，
+> 用默认的 GBK 去读就会看到一堆看不懂的字。
+
 **`cargo` 体检显示 `[!!]`：`no default is configured`？**
 工具链还没装，执行 `rustup default stable-x86_64-pc-windows-msvc` 即可。
 `[!!]` 表示"在 PATH 里但自检没通过"，比直接报"未找到"更值得看——

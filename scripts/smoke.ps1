@@ -75,7 +75,9 @@ try {
     $ready = Wait-Health -Port $Port -Times 30 -IntervalMs 300 -Proc $proc
     if (-not $ready) {
         Bad "服务器未能启动，日志："
-        Get-Content $outLog, $errLog -ErrorAction SilentlyContinue | ForEach-Object { "    $_" }
+        # -Encoding UTF8：Go 写的是 UTF-8，按默认的 ANSI 读会变成乱码
+        Get-Content $outLog, $errLog -Encoding UTF8 -ErrorAction SilentlyContinue |
+            ForEach-Object { "    $_" }
         exit 1
     }
     Good "/healthz -> ok"

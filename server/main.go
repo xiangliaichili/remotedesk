@@ -30,9 +30,12 @@ func main() {
 	log.Printf("[server] remotedesk %s (%s/%s, go %s)",
 		version, runtime.GOOS, runtime.GOARCH, runtime.Version())
 
-	// 确保数据目录存在
-	if err := os.MkdirAll(dirOf(cfg.DBPath), 0o755); err != nil {
-		log.Fatalf("create data dir: %v", err)
+	// 确保数据目录存在。
+	// 报错时把完整路径打出来：MkdirAll 会一路向上递归，路径写错（比如中文被读成乱码）
+	// 时它会在盘符根目录下建目录，只说 "Access is denied" 根本看不出问题在哪。
+	dataDir := dirOf(cfg.DBPath)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		log.Fatalf("create data dir %q: %v（检查 RD_DB=%q 是否指向可写路径）", dataDir, err, cfg.DBPath)
 	}
 
 	st, err := store.Open(cfg.DBPath)

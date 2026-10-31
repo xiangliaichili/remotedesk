@@ -160,7 +160,9 @@ $files = Get-ChildItem $dist -Recurse -File |
         $_.Name -ne "SHA256SUMS.txt" -and
         $_.Name -notlike "*~" -and
         $_.FullName -notlike "*\quickstart\*" -and
-        $_.FullName -notlike "*\smoke\*"
+        $_.FullName -notlike "*\smoke\*" -and
+        # server\data 是有人在 dist\server 目录直接跑二进制留下的运行时库
+        $_.FullName -notlike "*\server\data\*"
     } |
     Sort-Object FullName
 
@@ -190,7 +192,9 @@ Get-ChildItem $dist -Recurse -File |
         $_.Name -ne "SHA256SUMS.txt" -and
         $_.Name -notlike "*~" -and
         $_.FullName -notlike "*\quickstart\*" -and
-        $_.FullName -notlike "*\smoke\*"
+        $_.FullName -notlike "*\smoke\*" -and
+        # server\data 是有人在 dist\server 目录直接跑二进制留下的运行时库
+        $_.FullName -notlike "*\server\data\*"
     } |
     Sort-Object FullName |
     ForEach-Object {
