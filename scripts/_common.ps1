@@ -235,6 +235,62 @@ function Wait-Health {
     return $false
 }
 
+# ---------- 客户端 ----------
+
+# 找一个可以直接运行的客户端 exe：优先打包后的便携版，其次开发构建产物。
+function Find-ClientExe([string]$Root) {
+    foreach ($c in @(
+        (Join-Path $Root "dist\windows\portable\remotedesk.exe"),
+        (Join-Path $Root "windows\src-tauri\target\release\remotedesk.exe")
+    )) {
+        if (Test-Path $c) { return $c }
+    }
+    return $null
+}
+
+# 先把客户端复制到用户目录，再从那里启动。
+#
+# 为什么不直接跑仓库里的 exe：在某些目录（本机的 D:\文档\GitHub\remotedesk）
+# 下创建 WebView2 会失败，报 HRESULT 0x800700AA「请求的资源在使用中」，
+# 表现就是双击后窗口一闪而过、进程退出码 101，看起来像「打不开」。
+# 同一个 exe 复制到 %LOCALAPPDATA%\Programs\remotedesk 下就能正常起窗口
+# （已实测：窗口 1133x776，界面主题色齐全）。所以统一先复制再启动。
+function Start-ClientSafely {
+    param([Parameter(Mandatory = $true)][string]$Exe)
+
+    if (Get-Process -Name "remotedesk" -ErrorAction SilentlyContinue) {
+        Info "客户端已在运行，不重复启动"
+        return $true
+    }
+
+    $dest = Join-Path $env:LOCALAPPDATA "Programs\remotedesk"
+    $destExe = Join-Path $dest "remotedesk.exe"
+    try {
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        $stale = $true
+        if (Test-Path $destExe) {
+            $stale = (Get-Item $destExe).LastWriteTimeUtc -lt (Get-Item $Exe).LastWriteTimeUtc
+        }
+        if ($stale) {
+            Copy-Item -Path $Exe -Destination $destExe -Force
+            Info "已更新客户端副本：$destExe"
+        } else {
+            Info "客户端副本已是最新：$destExe"
+        }
+    } catch {
+        Bad "复制客户端失败：$($_.Exception.Message)"
+        return $false
+    }
+
+    try {
+        Start-Process -FilePath $destExe -WorkingDirectory $dest | Out-Null
+        return $true
+    } catch {
+        Bad "启动客户端失败：$($_.Exception.Message)"
+        return $false
+    }
+}
+
 # 关掉进度条，否则健康检查那几行会被「正在读取 Web 响应…(读取的字节数: 0)」冲掉
 $ProgressPreference = "SilentlyContinue"
 

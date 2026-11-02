@@ -130,7 +130,11 @@
 **前置**：Windows + [Go](https://go.dev/dl/)（装完开个新终端，`go version` 有输出即可）。
 
 **最省事：双击仓库根目录的 `start.cmd`**。它会生成配置 → 编译 → 后台启动 → 健康检查 →
-把「客户端该填的地址」打出来，窗口最后会停住，等你按任意键。
+把「客户端该填的地址」打出来 → **顺手把 Windows 客户端打开**，窗口最后会停住，等你按任意键。
+
+启动完成后用浏览器打开 `http://127.0.0.1:8443`，会看到「服务器运行中」的自检页：
+版本、已运行时长、本机/局域网地址、下一步该做什么，都在上面。
+**这个页面不是客户端** —— 它只用来确认服务器活着，远程控制界面在客户端窗口里。
 
 | 双击这个 | 干什么 |
 | --- | --- |
@@ -478,11 +482,18 @@ powershell -ExecutionPolicy Bypass -File ..\scripts\build-windows.ps1
 
 | 文件 | 说明 |
 | --- | --- |
-| `src-tauri\target\release\remotedesk.exe` | 免安装单文件，双击即用 |
+| `src-tauri\target\release\remotedesk.exe` | 免安装单文件（**别直接在 `target\release` 里双击**，原因见下） |
 | `...\bundle\nsis\remotedesk_1.3.0_x64-setup.exe` | NSIS 安装包（当前用户级，免管理员） |
 | `...\bundle\msi\remotedesk_1.3.0_x64_en-US.msi` | MSI 安装包 |
 
 体积约 10~15 MB（WebView2 用系统共享运行时，不重复打包）。
+
+> **双击 `remotedesk.exe` 窗口一闪就没？** 那是 WebView2 在个别目录下建窗口失败，
+> 控制台会看到 `failed to create webview: WebView2 error 0x800700AA 请求的资源在使用中`，
+> 进程退出码 101。同一个 exe 复制到 `%LOCALAPPDATA%\Programs\remotedesk\` 就能正常开。
+> `start.cmd` 已经这么做了（先复制再启动）；安装包装到的也正是那个位置。
+> 只想自己复制也行：把 exe 丢到任意**干净目录**再双击，不要在 `target\release` 这种
+> 堆满编译产物的目录里跑。
 
 **工作原理**
 
@@ -1497,6 +1508,18 @@ removeTrack + 重协商。
 **能不能不用域名？**
 可以，`install.sh --ip-only <IP>` 走 `http://IP:8080`；本地用 `--local`。
 
+**双击客户端一闪就没，或者根本没反应？**
+进程起来了但窗口没建出来，多半是 WebView2 创建失败（进程退出码 101）。两个原因：
+
+1. exe 所在目录会让 WebView2 初始化失败（报 `0x800700AA 请求的资源在使用中`）。
+   把 exe 复制到 `%LOCALAPPDATA%\Programs\remotedesk\` 再运行即可；
+   `start.cmd` 走的正是这条路，所以双击它比直接双击 exe 稳。
+2. 系统缺 WebView2 运行时。装 [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，
+   Windows 11 一般自带。
+
+**浏览器打开 `http://127.0.0.1:8443` 是一页说明，不是远程桌面界面？**
+这是正常的 —— 它是服务器自检页。远程控制在客户端窗口里，网页端不提供。
+
 **双击 `.ps1` 没反应，或者用记事本打开了？**
 Windows 默认把 `.ps1` 关联到编辑器，双击只会打开文件、不会执行。**别双击 `.ps1`**，
 双击仓库根目录的 `start.cmd` / `build.cmd` / `package.cmd` / `stop.cmd` 即可
@@ -1598,7 +1621,7 @@ Get-Content server\.env -Encoding UTF8          # 别省略 -Encoding
 | 被控端画面黑但连接正常 | RDP 会话锁屏/最小化时抓屏全黑；或多显示器抓了不存在的索引 |
 | 杀软报毒 | 未签名 + 能模拟键鼠，正式分发建议买证书配置 `certificateThumbprint` |
 | 语音/摄像头拿不到 | 先看首页自检卡片：政策、系统隐私、设备数三项 |
-| 启动即崩：`failed to create webview: WebView2 error: WindowsError(0x800700AA)` | 同一用户数据目录被占用（另一个实例还开着 / 杀软锁定 / 受限账户目录不可写）。关掉已有实例；或设 `WEBVIEW2_USER_DATA_FOLDER` 指向可写目录再启动 |
+| 启动即崩：`failed to create webview: WebView2 error 0x800700AA 请求的资源在使用中`，退出码 101 | **不是**数据目录被占用——实测是 WebView2 在个别目录下初始化失败：同一个 exe 放在 `D:\文档\GitHub\remotedesk` 下必崩，复制到 `%LOCALAPPDATA%\Programs\remotedesk\` 就正常。把 exe 复制到干净目录再运行（`start.cmd` 已自动这么做）。`WEBVIEW2_USER_DATA_FOLDER` 对 Tauri 无效，别在这上面浪费时间 |
 | `LNK1104: 无法打开文件 ...\Temp\lnk{...}.tmp` | 临时目录不可写，把 `TMP`/`TEMP` 指向项目内目录后重跑 cargo |
 
 MSVC 头文件/库找不到时，用

@@ -9,14 +9,20 @@
 #   1. 生成 server/.env（随机 JWT 密钥、自动探测内网 IP）
 #   2. 编译 Go 服务器（有缓存则跳过）
 #   3. 后台启动并做 /healthz 健康检查
-#   4. 打印「客户端该填的服务器地址」——Windows 客户端直接复制粘贴即可
+#   4. 打印「客户端该填的服务器地址」，并顺手把 Windows 客户端拉起来
+#
+# 客户端默认从 %LOCALAPPDATA%\Programs\remotedesk 启动（脚本会先复制过去）。
+# 原因见 _common.ps1 里 Start-ClientSafely 的注释：在个别目录下直接跑
+# 仓库里的 exe，WebView2 会创建失败（0x800700AA），窗口一闪就没。
 #
 # 前置：Go 1.22+（https://go.dev/dl/）。没有 Go 时脚本会提示，不会静默失败。
 param(
     [int]$Port = 8443,
     [string]$GoBin = "",
     [switch]$Stop,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$NoClient,
+    [switch]$Open
 )
 
 $ErrorActionPreference = "Stop"
@@ -156,22 +162,32 @@ Build-Server -Root $root -Go $go -OutFile $exe -Version $ver -Force:$Force | Out
 
 # ---------- 启动 ----------
 Step "启动服务器（端口 $Port）"
-if (Test-Path $pidFile) {
-    $old = Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($old -and (Get-Process -Id ([int]$old) -ErrorAction SilentlyContinue)) {
-        Bad "已有实例在跑 (pid=$old)，先执行 -Stop 或换个端口"
-        exit 1
-    }
-}
 
 $outLog = Join-Path $dataDir "server.out.log"
 $errLog = Join-Path $dataDir "server.err.log"
+
+# 上次起的实例还活着、而且 /healthz 通 -> 直接复用。
+# 用户重复双击 start.cmd 很常见，这时候更不能报错退出：他只是想再打开客户端，
+# 报「已有实例在跑」会让他以为坏了。确实要重启时用 -Stop 或 -Force。
+$serverPid = 0
+$noLog = $false
+$reused = $false
+if (Test-Path $pidFile) {
+    $old = Get-Content $pidFile -Encoding UTF8 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($old -and (Get-Process -Id ([int]$old) -ErrorAction SilentlyContinue)) {
+        if (Wait-Health -Port $Port -Times 1 -IntervalMs 100) {
+            $serverPid = [int]$old
+            $reused = $true
+        }
+    }
+}
 # 优先 Start-Process（能把 stdout/stderr 落到日志）。但环境里同时存在
 # HTTP_PROXY 与 http_proxy（代理软件很常见）时它会抛「已添加项。字典中的关键字...」，
 # 此时退回 WMI：子进程脱离控制台（关窗口也带不走服务），代价是不重定向日志——
 # 配置是从 server/.env 读的，不依赖环境变量继承。
-$serverPid = 0
-$noLog = $false
+if ($reused) {
+    Good "复用已在运行的实例 (pid=$serverPid)"
+} else {
 try {
     $serverPid = (Start-Process -FilePath $exe -WorkingDirectory $serverDir -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput $outLog -RedirectStandardError $errLog).Id
@@ -194,6 +210,15 @@ Set-Content -Path $pidFile -Value $serverPid -Encoding utf8
 
 $ready = Wait-Health -Port $Port -Times 40 -IntervalMs 250 -ProcId $serverPid
 if (-not $ready) {
+    # 端口上可能已经有一个能用的实例：上次启动留下的、pid 文件没记到，
+    # 或者刚起的这个把端口让给了它。这时绝不能报「没起来」——
+    # 用户看到失败就会反复重启，而服务其实一直是好的。
+    if (Wait-Health -Port $Port -Times 5 -IntervalMs 200) {
+        Warn "本次启动的进程没绑上端口，但 $Port 上已有一个可用实例，继续沿用它"
+        Info "要彻底重启用：start.cmd -Stop 然后再 start.cmd"
+        Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+        $serverPid = 0
+    } else {
     if ($noLog) {
         Bad "服务器没起来（本次没有日志文件，可手动在 server 目录执行二进制看输出）"
         Bad "常见原因：端口 $Port 被占用、.env 里 RD_LISTEN 写错、防火墙/杀软拦截"
@@ -205,8 +230,14 @@ if (-not $ready) {
     }
     Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
     exit 1
+    }
 }
-Good "/healthz -> ok (pid=$serverPid)"
+if ($serverPid -gt 0) {
+    Good "/healthz -> ok (pid=$serverPid)"
+} else {
+    Good "/healthz -> ok（沿用了已在运行的实例）"
+}
+}
 
 $lan = "http://${ip}:$Port"
 $loop = "http://127.0.0.1:$Port"
@@ -233,3 +264,26 @@ Write-Host " 停止：    双击 stop.cmd（或 start.cmd -Stop）" -ForegroundC
 Write-Host ""
 Write-Host " 下一步：登录/注册同一个账号 → 两台设备互相可见 → 点「连接」" -ForegroundColor White
 Write-Host ""
+
+# ---------- 启动客户端 ----------
+if (-not $NoClient) {
+    Step "启动客户端"
+    $client = Find-ClientExe $root
+    if (-not $client) {
+        Warn "没找到客户端 exe"
+        Info "已找过：dist\windows\portable\remotedesk.exe、windows\src-tauri\target\release\remotedesk.exe"
+        Info "先构建：双击 build.cmd；或直接安装 dist\windows 里的安装包"
+    } else {
+        Info "来源：$client"
+        if (Start-ClientSafely -Exe $client) {
+            Good "客户端已启动 —— 服务器地址填 $loop"
+        } else {
+            Warn "客户端没能启动，可手动双击：$client"
+        }
+    }
+}
+
+if ($Open) {
+    Start-Process $loop | Out-Null
+    Info "已在浏览器打开自检页：$loop"
+}
